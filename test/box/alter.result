@@ -193,7 +193,8 @@ _index:select{}
   - [313, 2, 'object', 'tree', {'unique': false}, [[2, 'str'], [3, 'num']]]
   - [320, 0, 'primary', 'tree', {'unique': true}, [[0, 'num']]]
   - [320, 1, 'uuid', 'tree', {'unique': true}, [[1, 'str']]]
-  - [325, 0, 'primary', 'tree', {'unique': true}, [[0, 'num']]]
+  - [325, 0, 'primary', 'tree', {'unique': true}, [[0, 'num'], [1, 'num']]]
+  - [325, 1, 'name', 'tree', {'unique': true}, [[3, 'str']]]
 ...
 -- modify indexes of a system space
 _index:delete{_index.id, 0}

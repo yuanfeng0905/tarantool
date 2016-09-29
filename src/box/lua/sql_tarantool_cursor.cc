@@ -430,7 +430,7 @@ bool TarantoolCursor::make_msgpuck_from_btree_cell(const char *dt, int sz) {
 				if (vals[i].GetType() == MP_NIL) {
 					//get new id from tarantool
 					uint64_t new_id = trn_api->get_new_autoincrement_id_for(space_id);
-					vals[i] = MValue(new_id);
+					vals[i] = MValue((unsigned long long) new_id);
 				}
 			}
 		}

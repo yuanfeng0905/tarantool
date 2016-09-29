@@ -54,10 +54,10 @@ static int do_mvalue_from_msgpuck(MValue *res, const char **data);
 public:
 	MValue();
 	MValue(const MValue &ob);
-	MValue(i64 n);
-	MValue(u64 n);
+	explicit MValue(i64 n);
+	explicit MValue(u64 n);
 	MValue(const char *src, int len = -1);
-	MValue(double num);
+	explicit MValue(double num);
 	MValue(const void *src, int len);
 
 	bool IsError() const;

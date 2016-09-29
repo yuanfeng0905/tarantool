@@ -2195,14 +2195,12 @@ get_sql_triggers(void *self_, sqlite3 *db, Schema *pSchema,
 			sqlite3_stmt *sqlite3_stmt;
 			uint32_t len = strlen(crt_stmt);
 			Trigger *pTrigger;
-			Vdbe *v;
 			const char *pTail;
 			int rc = sqlite3_prepare_v2(db, crt_stmt, len, &sqlite3_stmt, &pTail);
 			if (rc) {
 				say_debug("%s(): error while parsing create statement for trigger\n", __func_name);
 				return;
 			}
-			v = (Vdbe *)sqlite3_stmt;
 
 			Hash *trigHash = &pSchema->trigHash;
 			pTrigger = (Trigger*)sqlite3HashFind(trigHash, trig_name);
@@ -2300,7 +2298,7 @@ get_new_autoincrement_id_for(int space_id) {
 		return 0;
 	}
 	int fieldno = key_def->parts[0].fieldno;
-	MValue max_val((uint64_t)0);
+	MValue max_val(0ULL);
 	SpaceIterator::SIteratorCallback callback =\
 		[](box_tuple_t *tpl, int, void **argv) -> int {
 			int fieldno = *((int *)argv[0]);

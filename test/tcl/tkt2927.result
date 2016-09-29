@@ -80,7 +80,5 @@ tkt2927-6.14... Ok
 tkt2927-6.15... Ok
 tkt2927-6.16... Ok
 tkt2927-7.1... Ok
-tkt2927-7.2...
-Error: no query solution
-1 errors out of 84 tests
-Failures on these tests: tkt2927-7.2
+tkt2927-7.2... Ok
+0 errors out of 84 tests

@@ -13,8 +13,7 @@ limit-1.4.2... Ok
 limit-1.5... Ok
 limit-1.6... Ok
 limit-1.7... Ok
-limit-2.1...
-Error: no query solution
+limit-2.1... Ok
 limit-3.1... Ok
 limit-4.1... Ok
 limit-4.2... Ok
@@ -105,5 +104,5 @@ limit-14.3... Ok
 limit-14.4... Ok
 limit-14.6... Ok
 limit-14.7... Ok
-3 errors out of 104 tests
-Failures on these tests: limit-2.1 limit-5.3 limit-5.4
+2 errors out of 104 tests
+Failures on these tests: limit-5.3 limit-5.4

@@ -23,7 +23,6 @@ transitive1-400... Ok
 transitive1-401... Ok
 transitive1-402... Ok
 transitive1-403... Ok
-transitive1-410...
-Error: no query solution
-4 errors out of 21 tests
-Failures on these tests: transitive1-100 transitive1-110 transitive1-120 transitive1-410
+transitive1-410... Ok
+3 errors out of 21 tests
+Failures on these tests: transitive1-100 transitive1-110 transitive1-120

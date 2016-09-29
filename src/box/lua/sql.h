@@ -37,7 +37,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <inttypes.h>
-#include "sqlite3.h"
+#include "third_party/sqlite/src/sqlite3.h"
 
 #define ESTIMATED_ROW_SIZE 100
 
