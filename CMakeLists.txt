@@ -60,6 +60,10 @@ check_include_file(sys/time.h HAVE_SYS_TIME_H)
 check_include_file(unwind.h HAVE_UNWIND_H)
 check_include_file(cpuid.h HAVE_CPUID_H)
 check_include_file(sys/prctl.h HAVE_PRCTL_H)
+check_include_file(dlfcn.h HAVE_DLFCN_H)
+check_include_file(malloc.h MALLOC_H)
+check_include_file(memory.h MEMORY_H)
+check_include_file(strings.h STRINGS_H)
 
 check_symbol_exists(O_DSYNC fcntl.h HAVE_O_DSYNC)
 check_symbol_exists(fdatasync unistd.h HAVE_FDATASYNC)
@@ -67,6 +71,8 @@ check_symbol_exists(pthread_yield pthread.h HAVE_PTHREAD_YIELD)
 check_symbol_exists(sched_yield sched.h HAVE_SCHED_YIELD)
 check_symbol_exists(posix_fadvise fcntl.h HAVE_POSIX_FADVISE)
 check_symbol_exists(mremap sys/mman.h HAVE_MREMAP)
+
+check_function_exists(malloc_usable_size HAVE_MALLOC_USABLE_SIZE)
 
 check_function_exists(memmem HAVE_MEMMEM)
 check_function_exists(memrchr HAVE_MEMRCHR)
@@ -83,7 +89,11 @@ check_function_exists(fmemopen HAVE_FMEMOPEN)
 check_function_exists(funopen HAVE_FUNOPEN)
 check_function_exists(fopencookie HAVE_FOPENCOOKIE)
 check_function_exists(uuidgen HAVE_UUIDGEN)
+check_function_exists(strchrnul HAVE_STRCHRNUL)
+check_function_exists(usleep HAVE_USLEEP)
+check_function_exists(utime HAVE_UTIME)
 set(CMAKE_REQUIRED_LIBRARIES "")
+
 if (TARGET_OS_LINUX)
     set(CMAKE_REQUIRED_LIBRARIES rt)
 endif ()
@@ -98,6 +108,10 @@ else ()
     set(HAVE_CLOCK_GETTIME ${HAVE_CLOCK_GETTIME_DECL})
 endif ()
 set(CMAKE_REQUIRED_LIBRARIES "")
+
+check_function_exists(gmtime_r HAVE_GMTIME_R)
+check_function_exists(localtime_r HAVE_LOCALTIME_R)
+check_function_exists(localtime_s HAVE_LOCALTIME_S)
 
 # Checks for libev
 include(CheckStructHasMember)
@@ -187,6 +201,7 @@ find_package_message(TARANTOOL_VERSION
 #
 include_directories(${PROJECT_SOURCE_DIR}/src)
 include_directories(${PROJECT_BINARY_DIR}/src)
+
 include_directories(${PROJECT_SOURCE_DIR}/src/lib)
 include_directories(${PROJECT_SOURCE_DIR}/src/lib/small)
 include_directories(${PROJECT_SOURCE_DIR})
@@ -439,6 +454,7 @@ add_subdirectory(src)
 add_subdirectory(extra)
 add_subdirectory(test)
 add_subdirectory(doc)
+add_subdirectory(third_party/sqlite)
 
 if(NOT "${PROJECT_BINARY_DIR}" STREQUAL "${PROJECT_SOURCE_DIR}")
     add_custom_target(distclean)

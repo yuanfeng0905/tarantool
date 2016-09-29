@@ -381,6 +381,8 @@ box.schema.index.create = function(space_id, name, options)
         unique = 'boolean',
         id = 'number',
         if_not_exists = 'boolean',
+        crt_stmt = 'string',
+        autoincrement = 'boolean',
         dimension = 'number',
         distance = 'string',
         path = 'string',
@@ -512,6 +514,8 @@ box.schema.index.alter = function(space_id, index_id, options)
         type = 'string',
         parts = 'table',
         unique = 'boolean',
+        crt_stmt = 'string',
+        autoincrement = 'boolean',
         dimension = 'number',
         distance = 'string',
     }
@@ -582,6 +586,12 @@ box.schema.index.alter = function(space_id, index_id, options)
     end
     if options.distance ~= nil then
         key_opts.distance = options.distance
+    end
+    if options.crt_stmt ~= nil then
+        key_opts.crt_stmt = options.crt_stmt
+    end
+    if options.autoincrement ~= nil then
+        key_opts.autoincrement = options.autoincrement
     end
     if options.parts ~= nil then
         check_index_parts(options.parts)

@@ -1,0 +1,9 @@
+2016-09-29 23:11:18.293 [31176] main/101/tcltestrunner.lua C> version 1.7.1-493-g499634d
+2016-09-29 23:11:18.293 [31176] main/101/tcltestrunner.lua C> log level 5
+2016-09-29 23:11:18.293 [31176] main/101/tcltestrunner.lua I> mapping 107374184 bytes for tuple arena...
+2016-09-29 23:11:18.310 [31176] main/101/tcltestrunner.lua I> initializing an empty data directory
+2016-09-29 23:11:18.315 [31176] snapshot/101/main I> creating `./00000000000000000000.snap.inprogress'
+2016-09-29 23:11:18.315 [31176] snapshot/101/main I> saving snapshot `./00000000000000000000.snap.inprogress'
+2016-09-29 23:11:18.315 [31176] snapshot/101/main I> done
+2016-09-29 23:11:18.325 [31176] main/101/tcltestrunner.lua I> ready to accept requests
+2016-09-29 23:11:18.325 [31176] main/103/console/unix/:/tmp/tarantool- I> started

@@ -53,6 +53,7 @@ local function set_system_triggers(val)
     box.space._user:run_triggers(val)
     box.space._func:run_triggers(val)
     box.space._priv:run_triggers(val)
+    box.space._trigger:run_triggers(val)
 end
 
 --------------------------------------------------------------------------------
@@ -65,6 +66,7 @@ local function erase()
     truncate(box.space._user)
     truncate(box.space._func)
     truncate(box.space._priv)
+    truncate(box.space._trigger)
     --truncate(box.space._schema)
     box.space._schema:delete('version')
     box.space._schema:delete('max_id')
@@ -534,6 +536,48 @@ local function upgrade_to_1_7_2()
 end
 
 --------------------------------------------------------------------------------
+-- Tarantool 1.8.0
+--------------------------------------------------------------------------------
+local function upgrade_to_1_8_0()
+    if VERSION_ID >= version_id(1, 8, 0) then
+        return
+    end
+
+    upgrade_to_1_7_2()
+
+    --
+    -- _trigger
+    --
+    local _space = box.space[box.schema.SPACE_ID]
+    local _index = box.space[box.schema.INDEX_ID]
+    local _trigger = box.space[box.schema.TRIGGER_ID]
+    local MAP = setmap({})
+
+    log.info("create space _trigger")
+    _space:insert{_trigger.id, ADMIN, '_trigger', 'memtx', 0, MAP, {}}
+    -- primary key: node id
+    log.info("create index primary on _trigger")
+    _index:insert{_trigger.id, 0, 'primary', 'tree', {unique = true}, {{0, 'num'}, {1, 'num'}}}
+    _index:insert{_trigger.id, 1, 'name', 'tree', {unique = true}, {{3, 'str'}}}
+
+    local space_def = box.space._space:get(box.space._trigger.id)
+    if space_def[7] == nil or next(space_def[7]) == nil then
+        local format = {}
+        format[1] = {name='id', type='num'}
+        format[2] = {name = 'tid', type = 'num'}
+        format[3] = {name='owner', type='num'}
+        format[4] = {name='name', type='str'}
+        format[5] = {name='table', type='str'}
+        format[6] = {name='sql', type='str'}
+        format[7] = {name='setuid', type='bool'}
+        format[8] = {name = 'opts', type = 'map'}
+        log.info("alter space _trigger set format")
+        box.space._trigger:format(format)
+    end
+    log.info("set schema version to 1.8.0")
+    box.space._schema:replace({'version', 1, 8, 0})
+end
+--------------------------------------------------------------------------------
 
 local function upgrade()
     box.cfg{}
@@ -549,6 +593,7 @@ local function upgrade()
     upgrade_to_1_6_8()
     upgrade_to_1_7_1()
     upgrade_to_1_7_2()
+    upgrade_to_1_8_0()
 end
 
 local function bootstrap()

@@ -1,5 +1,7 @@
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/src/box/lua)
 
+include_directories(${LIBSQLITE_INCLUDE_DIR})
+
 set(lua_sources)
 lua_source(lua_sources lua/load_cfg.lua)
 lua_source(lua_sources lua/schema.lua)
@@ -8,6 +10,7 @@ lua_source(lua_sources lua/session.lua)
 lua_source(lua_sources lua/snapshot_daemon.lua)
 lua_source(lua_sources lua/net_box.lua)
 lua_source(lua_sources lua/upgrade.lua)
+lua_source(lua_sources lua/sql.lua)
 set(bin_sources)
 bin_source(bin_sources bootstrap.snap bootstrap.h)
 
@@ -79,7 +82,18 @@ add_library(box STATIC
     lua/error.cc
     lua/session.c
     lua/net_box.c
+    lua/sql.cc
+    lua/sql_mvalue.cc
+    lua/sql_tarantool_cursor.cc
+    lua/space_iterator.cc
     ${bin_sources})
 
-target_link_libraries(box ${LZ4_LIBRARIES} ${ZSTD_LIBRARIES})
+set_source_files_properties(
+    lua/sql.cc
+    lua/sql_mvalue.cc
+    lua/sql_tarantool_cursor.cc
+    PROPERTY COMPILE_FLAGS "-I${PROJECT_SOURCE_DIR}/third_party/sqlite/src -I${PROJECT_SOURCE_DIR}/src/trivia")
+
+target_link_libraries(box ${ZSTD_LIBRARIES} trnsqlite)
+
 add_dependencies(box build_bundled_libs)

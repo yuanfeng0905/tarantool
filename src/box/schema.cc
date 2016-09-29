@@ -251,7 +251,7 @@ schema_init()
 	 */
 	/* _schema - key/value space with schema description */
 	struct space_def def = {
-		BOX_SCHEMA_ID, ADMIN, 0, "_schema", "memtx", {false}
+		BOX_SCHEMA_ID, ADMIN, 0, "_schema", "memtx", {false, false, ""}
 	};
 	struct key_opts opts = key_opts_default;
 	struct key_def *key_def = key_def_new(def.id,
@@ -295,6 +295,11 @@ schema_init()
 	key_def->space_id = def.id = BOX_CLUSTER_ID;
 	snprintf(def.name, sizeof(def.name), "_cluster");
 	(void) sc_space_new(&def, key_def, &on_replace_cluster);
+
+	/* _trigger - all existing SQL triggers */
+	key_def->space_id = def.id = BOX_TRIGGER_ID;
+	snprintf(def.name, sizeof(def.name), "_trigger");
+	(void) sc_space_new(&def, key_def, NULL);
 	key_def_delete(key_def);
 
 	/* _index - definition of indexes in all spaces */
