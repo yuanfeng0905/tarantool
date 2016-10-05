@@ -1059,10 +1059,10 @@ make_msgpuck_from(const Table *table, int &size, const char *crt_stmt) {
 	int type_len = strlen("type");
 	int engine_len = strlen(engine);
 	int temporary_len = strlen("temporary");
-	int view_len = strlen("view");
+	int view_len = strlen("is_view");
 	int table_name_len = strlen(table->zName);
 	int crt_stmt_len = crt_stmt ? strlen(crt_stmt) : 0;
-	int stmt_len = strlen("crt_stmt");
+	int stmt_len = strlen("sql");
 	int has_crt_stmt = !!crt_stmt;
 	int max_type_len = get_maximum_field_type_len();
 	Column *cur;
@@ -1114,11 +1114,11 @@ make_msgpuck_from(const Table *table, int &size, const char *crt_stmt) {
 		it = mp_encode_bool(it, true);
 	}
 	if (is_view) {
-		it = mp_encode_str(it, "view", view_len);
+		it = mp_encode_str(it, "is_view", view_len);
 		it = mp_encode_bool(it, true);
 	}
 	if (crt_stmt) {
-		it = mp_encode_str(it, "crt_stmt", stmt_len);
+		it = mp_encode_str(it, "sql", stmt_len);
 		it = mp_encode_str(it, crt_stmt, crt_stmt_len);
 	}
 	it = mp_encode_array(it, table->nCol);
@@ -1193,11 +1193,11 @@ make_msgpuck_from(const SIndex *index, int &size, const char *crt_stmt) {
 		it = mp_encode_bool(it, true);
 	}
 	if (crt_stmt) {
-		it = mp_encode_str(it, "crt_stmt", 8);
+		it = mp_encode_str(it, "sql", 8);
 		it = mp_encode_str(it, crt_stmt, crt_stmt_len);
 	}
 	if (index->is_autoincrement) {
-		it = mp_encode_str(it, "autoincrement", 13);
+		it = mp_encode_str(it, "is_autoincrement", 13);
 		it = mp_encode_bool(it, true);
 	}
 	it = mp_encode_array(it, index->nKeyCol);
@@ -1433,7 +1433,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 {
 	int cnt = box_tuple_field_count(tpl);
 	if (cnt != 7) {
-		say_debug("%s(): box_tuple_field_count not equal 7, but %d\n", __FUNCTION__, cnt);
+		say_debug("%s(): box_tuple_field_count not equal 7, but %d\n", __func__, cnt);
 		return NULL;
 	}
 	sqlite3 *db_alloc = 0;
@@ -1445,14 +1445,14 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 	int type = (int)mp_typeof(*data);
 	MValue tbl_id = MValue::FromMSGPuck(&data);
 	if (tbl_id.GetType() != MP_UINT) {
-		say_debug("%s(): field[0] in tuple in SPACE must be uint, but is %d\n", __FUNCTION__, type);
+		say_debug("%s(): field[0] in tuple in SPACE must be uint, but is %d\n", __func__, type);
 		return NULL;
 	}
 
 	data = box_tuple_field(tpl, 2);
 	type = (int)mp_typeof(*data);
 	if (type != MP_STR) {
-		say_debug("%s(): field[2] in tuple in SPACE must be string, but is %d\n", __FUNCTION__, type);
+		say_debug("%s(): field[2] in tuple in SPACE must be string, but is %d\n", __func__, type);
 		return NULL;
 	} else {
 		size_t len;
@@ -1498,7 +1498,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 	table->szTabRow = ESTIMATED_ROW_SIZE;
 	table->tnum = make_space_id(tbl_id.GetUint64());
 	if (db->mallocFailed) {
-		say_debug("%s(): error while allocating memory for table\n", __FUNCTION__);
+		say_debug("%s(): error while allocating memory for table\n", __func__);
 		return NULL;
 	}
 	table->pSchema = pSchema;
@@ -1541,7 +1541,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 				//this is TABLE
 				rc = sqlite3_prepare_v3_taran(db, z_sql, len, &stmt, &pTail);
 				if (rc != SQLITE_OK) {
-					say_debug("%s(): error while parsing create statement for table\n", __FUNCTION__);
+					say_debug("%s(): error while parsing create statement for table\n", __func__);
 					return NULL;
 				}
 				v = (Vdbe *)stmt;
@@ -1549,7 +1549,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 				void **argv;
 				rc = sqlite3VdbeNestedCallbackByID(v, "creating space", NULL, NULL, &argv);
 				if (rc < 0) {
-					say_debug("%s(): creating space callback was not found\n", __FUNCTION__);
+					say_debug("%s(): creating space callback was not found\n", __func__);
 					sqlite3_finalize(stmt);
 					return NULL;
 				}
@@ -1566,7 +1566,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 				//this is VIEW
 				rc = sqlite3_prepare_v2(db, z_sql, len, &stmt, &pTail);
 				if (rc != SQLITE_OK) {
-					say_debug("%s(): error while parsing create statement for view\n", __FUNCTION__);
+					say_debug("%s(): error while parsing create statement for view\n", __func__);
 					return NULL;
 				}
 				if (!db->init.busy) {
@@ -1606,7 +1606,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 		map_size = mp_decode_map(&data);
 		MValue colname, coltype;
 		if (map_size != 2) {
-			say_debug("%s(): map_size not equal 2, but %u\n", __FUNCTION__, map_size);
+			say_debug("%s(): map_size not equal 2, but %u\n", __func__, map_size);
 			free_cols_content();
 			return NULL;
 		}
@@ -1614,7 +1614,7 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 			MValue key = MValue::FromMSGPuck(&data);
 			MValue val = MValue::FromMSGPuck(&data);
 			if ((key.GetType() != MP_STR) || (val.GetType() != MP_STR)) {
-				say_debug("%s(): unexpected not string format\n", __FUNCTION__);
+				say_debug("%s(): unexpected not string format\n", __func__);
 				free_cols_content();
 				return NULL;
 			}
@@ -1626,13 +1626,13 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 				//type
 				coltype = val;
 			} else {
-				say_debug("%s(): unknown string in space_format\n", __FUNCTION__);
+				say_debug("%s(): unknown string in space_format\n", __func__);
 				free_cols_content();
 				return NULL;
 			}
 		}
 		if (colname.IsEmpty() || coltype.IsEmpty()) {
-			say_debug("%s(): both name and type must be init\n", __FUNCTION__);
+			say_debug("%s(): both name and type must be init\n", __func__);
 		}
 		char c1 = coltype.GetStr()[0];
 		char c2 = coltype.GetStr()[1];
@@ -1858,14 +1858,14 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db, Table *table, bo
 		if (value.GetType() != MP_BOOL) {
 			if (value.GetType() != MP_STR) {
 				say_debug("%s(): field[4][%u].value must be string 'crt_stmt',"\
-					" but type %d\n", __FUNCTION__, j, value.GetType());
+					" but type %d\n", __func__, j, value.GetType());
 				free_index_azColls();
 				return NULL;
 			}
 			if ((key.GetStr()[0] == 'C') || (key.GetStr()[0] == 'c')) {
-				say_debug("%s(): found index with crt_stmt: %s\n", __FUNCTION__, value.GetStr());
+				say_debug("%s(): found index with crt_stmt: %s\n", __func__, value.GetStr());
 			} else {
-				say_debug("%s(): unknown index option: %s\n", __FUNCTION__, key.GetStr());
+				say_debug("%s(): unknown index option: %s\n", __func__, key.GetStr());
 				free_index_azColls();
 				return NULL;
 			}
@@ -1876,10 +1876,10 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db, Table *table, bo
 				if (index->idxType != 2) index->idxType = 1;
 			}
 		} else if ((key.GetStr()[0] == 'A') || (key.GetStr()[0] == 'a')) {
-			say_debug("%s(): found index with autoincrement: %s\n", __FUNCTION__, index->zName);
+			say_debug("%s(): found index with autoincrement: %s\n", __func__, index->zName);
 			index->is_autoincrement = 1;
 		} else {
-			say_debug("%s(): unknown index option: %s\n", __FUNCTION__, key.GetStr());
+			say_debug("%s(): unknown index option: %s\n", __func__, key.GetStr());
 			free_index_azColls();
 			return NULL;
 		}
@@ -1926,7 +1926,7 @@ drop_index(int space_id, int index_id) {
 	key_end = mp_encode_uint(key_end, index_id);
 	rc = box_delete(BOX_INDEX_ID, 0, key, key_end, NULL);
 	if (rc) {
-		say_debug("%s(): error = %s\n", __FUNCTION__, GetLastErrMsg);
+		say_debug("%s(): error = %s\n", __func__, GetLastErrMsg);
 	}
 	return rc;
 }
@@ -2259,7 +2259,7 @@ uint64_t
 get_new_autoincrement_id_for(int space_id) {
 	struct space *space = space_by_id(space_id);
 	if (space == NULL) {
-		say_debug("%s(): space with id %d was not found\n", __FUNCTION__, space_id);
+		say_debug("%s(): space with id %d was not found\n", __func__, space_id);
 		return 0;
 	}
 	struct key_def *key_def = NULL;
@@ -2274,11 +2274,11 @@ get_new_autoincrement_id_for(int space_id) {
 		break;
 	}
 	if (key_def == NULL) {
-		say_debug("%s(): key_def of primary index was not found\n", __FUNCTION__);
+		say_debug("%s(): key_def of primary index was not found\n", __func__);
 		return 0;
 	}
 	if (key_def->part_count != 1) {
-		say_debug("%s(): autoincrement field must be single\n", __FUNCTION__);
+		say_debug("%s(): autoincrement field must be single\n", __func__);
 		return 0;
 	}
 	int fieldno = key_def->parts[0].fieldno;
@@ -2475,7 +2475,7 @@ trntl_drop_table(Btree *p, int iTable, int *piMoved)
 	*piMoved = 0;
 	(void)p;
 	say_debug("%s(): space_id: %d, index_id: %d\n",
-		__FUNCTION__, space_id, index_id);
+		__func__, space_id, index_id);
 	if (index_id == 15) {
 		rc = drop_all_indices(space_id);
 		if (rc) {
@@ -2494,7 +2494,7 @@ trntl_drop_table(Btree *p, int iTable, int *piMoved)
 	}
 	if (rc) {
 		say_debug("%s(): error while droping = %s\n",
-			__FUNCTION__, GetLastErrMsg);
+			__func__, GetLastErrMsg);
 		return SQLITE_ERROR;
 	}
 	return SQLITE_OK;

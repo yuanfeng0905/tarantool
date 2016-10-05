@@ -113,8 +113,8 @@ const struct key_opts key_opts_default = {
 
 const struct opt_def key_opts_reg[] = {
 	OPT_DEF("unique", MP_BOOL, struct key_opts, is_unique),
-	OPT_DEF("crt_stmt", MP_STR, struct key_opts, crt_stmt),
-	OPT_DEF("autoincrement", MP_BOOL, struct key_opts, autoincrement),
+	OPT_DEF("sql", MP_STR, struct key_opts, crt_stmt),
+	OPT_DEF("is_autoincrement", MP_BOOL, struct key_opts, autoincrement),
 	OPT_DEF("dimension", MP_UINT, struct key_opts, dimension),
 	OPT_DEF("distance", MP_STR, struct key_opts, distancebuf),
 	OPT_DEF("path", MP_STR, struct key_opts, path),
@@ -437,12 +437,14 @@ key_def_build_secondary(struct key_def *primary, struct key_def *secondary)
 
 const struct space_opts space_opts_default = {
 	/* .temporary = */ false,
-	/* .view = */ false,
+	/* .is_view = */ false,
 	{ '\0' },
 };
 
 const struct opt_def space_opts_reg[] = {
 	OPT_DEF("temporary", MP_BOOL, struct space_opts, temporary),
+	OPT_DEF("is_view", MP_BOOL, struct space_opts, is_view),
+	OPT_DEF("sql", MP_STR, struct space_opts, sql),
 	{ NULL, MP_NIL, 0, 0 }
 };
 

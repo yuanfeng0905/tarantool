@@ -48,7 +48,7 @@ extern "C" {
 enum {
 	BOX_ENGINE_MAX = 3, /* + 1 to the actual number of engines */
 	BOX_SPACE_MAX = INT32_MAX,
-	BOX_CRT_STMT_MAX = 4000,
+	BOX_SQL_STMT_MAX = 4000,
 	BOX_FUNCTION_MAX = 32000,
 	BOX_INDEX_MAX = 128,
 	BOX_NAME_MAX = 32,
@@ -192,7 +192,7 @@ struct key_opts {
 	int64_t lsn;
 
 	bool autoincrement;
-	char crt_stmt[BOX_CRT_STMT_MAX];
+	char crt_stmt[BOX_SQL_STMT_MAX];
 };
 
 extern const struct key_opts key_opts_default;
@@ -330,12 +330,12 @@ struct space_opts {
 	 */
 	bool temporary;
 	/* The space is actually an SQL view */
-	bool view;
+	bool is_view;
 	/**
 	 * SQL create stament for that space
 	 * not null only in if space created via SQL.
 	 */
-	char crt_stmt[BOX_CRT_STMT_MAX + 1];
+	char sql[BOX_SQL_STMT_MAX + 1];
 };
 
 extern const struct space_opts space_opts_default;
