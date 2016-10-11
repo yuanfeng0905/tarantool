@@ -1,7 +1,5 @@
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/src/box/lua)
 
-include_directories(${LIBSQLITE_INCLUDE_DIR})
-
 set(lua_sources)
 lua_source(lua_sources lua/load_cfg.lua)
 lua_source(lua_sources lua/schema.lua)
@@ -88,11 +86,20 @@ add_library(box STATIC
     lua/space_iterator.cc
     ${bin_sources})
 
+# Currently, sqlite is grafted in a somewhat hackish way.
+# In particular, internal and generated headers are necessary,
+# hence the include path for source files depending on sqlite below.
+# Also sqlite headers should implicily include trivia/config.h to
+# be consistent with our custom sqlite library build.
 set_source_files_properties(
     lua/sql.cc
     lua/sql_mvalue.cc
     lua/sql_tarantool_cursor.cc
-    PROPERTY COMPILE_FLAGS "-I${PROJECT_SOURCE_DIR}/third_party/sqlite/src -I${PROJECT_SOURCE_DIR}/src/trivia")
+    PROPERTY COMPILE_FLAGS "\
+-D_HAVE_SQLITE_CONFIG_H=1 \
+-I${PROJECT_BINARY_DIR}/src/trivia \
+-I${PROJECT_SOURCE_DIR}/third_party/sqlite/src \
+-I${PROJECT_BINARY_DIR}/third_party/sqlite/src")
 
 target_link_libraries(box ${ZSTD_LIBRARIES} trnsqlite)
 
