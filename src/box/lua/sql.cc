@@ -1503,13 +1503,12 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 	}
 	table->pSchema = pSchema;
 	table->iPKey = -1;
-	/* View has not got any tableFlags in sqlite */
-	if (! is_view) {
-		table->tabFlags = TF_WithoutRowid | TF_HasPrimaryKey;
-	}
+	table->tabFlags = TF_WithoutRowid | TF_HasPrimaryKey;
 	//Get flags
-	if (is_temp) *is_temp = false;
-	if (is_view) *is_view = false;
+	if (is_temp)
+		*is_temp = false;
+	if (is_view)
+		*is_view = false;
 	bool local_is_view = false;
 
 	data = box_tuple_field(tpl, 5);
@@ -1524,8 +1523,11 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 			if (is_temp) *is_temp = true;
 		}
 		if (!strcmp(pname, "view") && value.GetBool()) {
-			if (is_view) *is_view = true;
+			if (is_view)
+				*is_view = true;
 			local_is_view = true;
+			/* View has not got any tableFlags in sqlite */
+			table->tabFlags = 0;
 		}
 		if (!strcmp(pname, "crt_stmt") && !is_delete) {
 			/* we need not to parse crt_stmt_in case of deleting
