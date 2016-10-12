@@ -379,6 +379,13 @@ struct cord {
 	/** The "main" fiber of this cord, the scheduler. */
 	struct fiber sched;
 	struct fiber_pool fiber_pool;
+	/**
+	 * Value of io_collect_interval configured by the administrator.
+	 * Actual io_collect_interval used by the event loop cannot be
+	 * less than this value, but it can be greater if throttling is
+	 * enabled (see cord_set_throttle_interval()).
+	 */
+	ev_tstamp io_collect_interval;
 	char name[FIBER_NAME_MAX];
 };
 
@@ -461,6 +468,12 @@ cord_name(struct cord *cord)
 /** True if this cord represents the process main thread. */
 bool
 cord_is_main();
+
+void
+cord_set_io_collect_interval(struct cord *cord, ev_tstamp interval);
+
+void
+cord_set_throttle_interval(struct cord *cord, ev_tstamp interval);
 
 void
 fiber_init(int (*fiber_invoke)(fiber_func f, va_list ap));

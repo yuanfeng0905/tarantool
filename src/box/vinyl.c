@@ -317,6 +317,43 @@ vy_quota_update_watermark(struct vy_quota *q, size_t max_range_size,
 		q->watermark = 0;
 }
 
+static void
+vy_update_throttle_timeout(double write_amp, size_t avg_write_size,
+			   int64_t tx_write_rate, int64_t dump_bandwidth)
+{
+	/*
+	 * Effective dump bandwidth is write_amp times less than the
+	 * observed one, because we effectively write to disk as much
+	 * as write_amp times what tx thread inserts.
+	 */
+	dump_bandwidth /= write_amp;
+
+	if (dump_bandwidth >= tx_write_rate) {
+		cord_set_throttle_interval(cord(), 0);
+		return;
+	}
+
+	/*
+	 * In the time it takes the tx thread to insert X bytes,
+	 * we can only dump
+	 *
+	 *   Y = dump_bandwidth * X / tx_write_rate  bytes
+	 *
+	 * So to let the dump thread catch up, we should throttle
+	 * the tx thread for
+	 *
+	 *   (X - Y) / dump_bandwidth  seconds
+	 *
+	 * which is equal to
+	 *
+	 *   X * (1 / dump_bandwidth - 1 / tx_write_rate)
+	 */
+	ev_tstamp timeout = (1.0 / (dump_bandwidth + 1) -
+			     1.0 / (tx_write_rate + 1)) * avg_write_size;
+
+	cord_set_throttle_interval(cord(), timeout);
+}
+
 static int
 path_exists(const char *path)
 {
@@ -5975,6 +6012,20 @@ vy_env_quota_timer_cb(ev_loop *loop, ev_timer *timer, int events)
 	int64_t tx_write_rate = vy_stat_tx_write_rate(e->stat);
 	int64_t dump_bandwidth = vy_stat_dump_bandwidth(e->stat);
 
+	/*
+	 * Write amplification may be < 1 if there have been a lot of
+	 * updates issued for the same keys, but we shouldn't assume it
+	 * will always hold.
+	 */
+	double write_amp = ((double)e->stat->dump_total /
+			    (rmean_total(e->stat->rmean, VY_STAT_TX_WRITE) + 1));
+	if (write_amp < 1)
+		write_amp = 1;
+
+	/* Estimate average number of bytes written per transaction. */
+	size_t avg_write_size = (tx_write_rate /
+				 (rmean_mean(e->stat->rmean, VY_STAT_TX) + 1));
+
 	size_t max_range_size = 0;
 	struct heap_iterator it;
 	vy_dump_heap_iterator_init(&e->scheduler->dump_heap, &it);
@@ -5987,6 +6038,9 @@ vy_env_quota_timer_cb(ev_loop *loop, ev_timer *timer, int events)
 
 	vy_quota_update_watermark(e->quota, max_range_size,
 				  tx_write_rate, dump_bandwidth);
+
+	vy_update_throttle_timeout(write_amp, avg_write_size,
+				   tx_write_rate, dump_bandwidth);
 }
 
 struct vy_env *

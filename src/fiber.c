@@ -785,6 +785,7 @@ cord_create(struct cord *cord, const char *name)
 
 	ev_idle_init(&cord->idle_event, fiber_schedule_idle);
 	cord_set_name(name);
+	cord->io_collect_interval = 0;
 
 	/* Record stack extents */
 #if (HAVE_PTHREAD_GET_STACKSIZE_NP && HAVE_PTHREAD_GET_STACKADDR_NP)
@@ -1082,6 +1083,20 @@ bool
 cord_is_main()
 {
 	return cord() == &main_cord;
+}
+
+void
+cord_set_io_collect_interval(struct cord *cord, ev_tstamp interval)
+{
+	cord->io_collect_interval = interval;
+	ev_set_io_collect_interval(cord->loop, interval);
+}
+
+void
+cord_set_throttle_interval(struct cord *cord, ev_tstamp interval)
+{
+	ev_set_io_collect_interval(cord->loop,
+			MAX(interval, cord->io_collect_interval));
 }
 
 struct slab_cache *

@@ -443,7 +443,7 @@ box_set_log_level(void)
 extern "C" void
 box_set_io_collect_interval(void)
 {
-	ev_set_io_collect_interval(loop(), cfg_getd("io_collect_interval"));
+	cord_set_io_collect_interval(cord(), cfg_getd("io_collect_interval"));
 }
 
 extern "C" void
