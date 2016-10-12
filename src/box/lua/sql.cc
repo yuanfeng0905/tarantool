@@ -1834,38 +1834,19 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db, Table *table, bo
 	for (int j = 0; j < map_size; ++j) {
 		key = MValue::FromMSGPuck(&data);
 		value = MValue::FromMSGPuck(&data);
-		if (key.GetType() != MP_STR) {
-			say_debug("%s(): field[4][%u].key must be string, but type %d\n", __func__, j, key.GetType());
-			free_index_azColls();
-			return NULL;
-		}
-		if (value.GetType() != MP_BOOL) {
-			if (value.GetType() != MP_STR) {
-				say_debug("%s(): field[4][%u].value must be string 'crt_stmt',"\
-					" but type %d\n", __func__, j, value.GetType());
-				free_index_azColls();
-				return NULL;
-			}
-			if ((key.GetStr()[0] == 'C') || (key.GetStr()[0] == 'c')) {
-				say_debug("%s(): found index with crt_stmt: %s\n", __func__, value.GetStr());
-			} else {
-				say_debug("%s(): unknown index option: %s\n", __func__, key.GetStr());
-				free_index_azColls();
-				return NULL;
-			}
+		if (key.GetType() != MP_STR)
 			continue;
-		}
-		if ((key.GetStr()[0] == 'u') || (key.GetStr()[0] == 'U')) {
-			if (value.GetBool()) {
-				if (index->idxType != 2) index->idxType = 1;
-			}
-		} else if ((key.GetStr()[0] == 'A') || (key.GetStr()[0] == 'a')) {
+		if (value.GetType() != MP_BOOL)
+			continue;
+
+		if (strcasecmp(key.GetStr(), "unique") == 0) {
+
+			if (value.GetBool() && index->idxType != 2)
+				index->idxType = 1;
+		} else if (strcasecmp(key.GetStr(), "is_autoincrement") == 0) {
+
 			say_debug("%s(): found index with autoincrement: %s\n", __func__, index->zName);
 			index->is_autoincrement = 1;
-		} else {
-			say_debug("%s(): unknown index option: %s\n", __func__, key.GetStr());
-			free_index_azColls();
-			return NULL;
 		}
 	}
 
@@ -1891,11 +1872,13 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db, Table *table, bo
 				break;
 			}
 		}
-		if (used) continue;
+		if (used)
+			continue;
 		index->aiColumn[start++] = j;
 	}
 
-	for (int i = 0; i < index->nKeyCol; ++i) index->aiRowLogEst[i] = table->nRowLogEst;
+	for (int i = 0; i < index->nKeyCol; ++i)
+		index->aiRowLogEst[i] = table->nRowLogEst;
 
 	ok = true;
 	return index.take_away();
