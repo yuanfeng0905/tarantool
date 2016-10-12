@@ -192,7 +192,6 @@ struct key_opts {
 	int64_t lsn;
 
 	bool autoincrement;
-	char crt_stmt[BOX_SQL_STMT_MAX];
 };
 
 extern const struct key_opts key_opts_default;

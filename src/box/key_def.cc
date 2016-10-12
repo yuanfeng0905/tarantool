@@ -108,12 +108,10 @@ const struct key_opts key_opts_default = {
 	/* .compact_wm          = */ 2,
 	/* .lsn                 = */ 0,
 	/* .autoincrement       = */ false,
-	/* .crt_stmt            = */ { 0 },
 };
 
 const struct opt_def key_opts_reg[] = {
 	OPT_DEF("unique", MP_BOOL, struct key_opts, is_unique),
-	OPT_DEF("sql", MP_STR, struct key_opts, crt_stmt),
 	OPT_DEF("is_autoincrement", MP_BOOL, struct key_opts, autoincrement),
 	OPT_DEF("dimension", MP_UINT, struct key_opts, dimension),
 	OPT_DEF("distance", MP_STR, struct key_opts, distancebuf),

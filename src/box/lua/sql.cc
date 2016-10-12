@@ -99,13 +99,13 @@ typedef struct sql_trntl_self {
  * Converts struct Table object into msgpuck representation
  */
 char *
-make_msgpuck_from(const Table *table, int &size, const char *crt_stmt);
+make_msgpuck_from_table(const Table *table, int &size, const char *crt_stmt);
 
 /**
  * Converts struct SIndex object into msgpuck representation
  */
 char *
-make_msgpuck_from(const SIndex *index, int &size, const char *crt_stmt);
+make_msgpuck_from_index(const SIndex *index, int &size, const char *crt_stmt);
 
 /**
  * True if space with name "name" exists in _space.
@@ -1049,7 +1049,7 @@ box_lua_sqlite_init(struct lua_State *L)
 //~~~~~~~~~~~~~~~~~~~~~~~~ G L O B A L   O P E R A T I O N S   (C++) ~~~~~~~~~~~~~~~~~~~~~~~~
 
 char *
-make_msgpuck_from(const Table *table, int &size, const char *crt_stmt) {
+make_msgpuck_from_table(const Table *table, int &size, const char *crt_stmt) {
 	char *msg_data, *it;
 	int space_id = get_space_id_from(table->tnum);
 	int msg_size = 5 + mp_sizeof_uint(space_id);
@@ -1142,42 +1142,35 @@ make_msgpuck_from(const Table *table, int &size, const char *crt_stmt) {
 }
 
 char *
-make_msgpuck_from(const SIndex *index, int &size, const char *crt_stmt) {
+make_msgpuck_from_index(const SIndex *index, int &size)
+{
 	char *msg_data = NULL;
 	int msg_size = 5;
 	int space_id = get_space_id_from(index->tnum);
 	int index_id = get_index_id_from(index->tnum) % 15;
 	int name_len = strlen(index->zName);
-	int crt_stmt_len = 0;
-	int opts_size = 1; //'unique' opt always here
+	int opt_count = 1; // 'unique' opt always here
 	int max_type_len = 10;
-	if (crt_stmt) {
-		crt_stmt_len = strlen(crt_stmt);
-		opts_size++;
-	}
-	if (index->is_autoincrement) {
-		opts_size++;
-	}
+	if (index->is_autoincrement)
+		opt_count++;
+
 	const char *type = "TREE";
 	int type_len = strlen(type);
 	msg_size += mp_sizeof_uint(space_id);
 	msg_size += mp_sizeof_uint(index_id);
 	msg_size += mp_sizeof_str(name_len);
 	msg_size += mp_sizeof_str(type_len);
-	msg_size += mp_sizeof_map(opts_size);
-	msg_size += mp_sizeof_str(6); //strlen('unique')
+	msg_size += mp_sizeof_map(opt_count);
+	msg_size += mp_sizeof_str(strlen("unique"));
 	msg_size += mp_sizeof_bool(true); //sizes of true and false are equal
-	if (crt_stmt) {
-		msg_size += mp_sizeof_str(8); //len of 'crt_stmt'
-		msg_size += mp_sizeof_str(crt_stmt_len);
-	}
+	msg_size += mp_sizeof_str(strlen("is_autoincrement"));
+	msg_size += mp_sizeof_bool(true);
 	msg_size += mp_sizeof_array(index->nKeyCol);
 	for (int i = 0; i < index->nKeyCol; ++i) {
 		msg_size += mp_sizeof_array(2);
-			msg_size += mp_sizeof_uint(index->aiColumn[i]);
-			msg_size += mp_sizeof_str(max_type_len);
+		msg_size += mp_sizeof_uint(index->aiColumn[i]);
+		msg_size += mp_sizeof_str(max_type_len);
 	}
-
 	msg_data = new char[msg_size];
 	char *it = msg_data;
 	it = mp_encode_array(it, 6);
@@ -1185,19 +1178,12 @@ make_msgpuck_from(const SIndex *index, int &size, const char *crt_stmt) {
 	it = mp_encode_uint(it, index_id);
 	it = mp_encode_str(it, index->zName, name_len);
 	it = mp_encode_str(it, type, type_len);
-	it = mp_encode_map(it, opts_size);
-		it = mp_encode_str(it, "unique", 6);
-	if (index->idxType == 0) {
-		it = mp_encode_bool(it, false);
-	} else {
-		it = mp_encode_bool(it, true);
-	}
-	if (crt_stmt) {
-		it = mp_encode_str(it, "sql", 8);
-		it = mp_encode_str(it, crt_stmt, crt_stmt_len);
-	}
+	it = mp_encode_map(it, opt_count);
+		it = mp_encode_str(it, "unique", strlen("unique"));
+	it = mp_encode_bool(it, index->idxType != 0);
 	if (index->is_autoincrement) {
-		it = mp_encode_str(it, "is_autoincrement", 13);
+		it = mp_encode_str(it, "is_autoincrement",
+				   strlen("is_autoincrement"));
 		it = mp_encode_bool(it, true);
 	}
 	it = mp_encode_array(it, index->nKeyCol);
@@ -1213,7 +1199,7 @@ make_msgpuck_from(const SIndex *index, int &size, const char *crt_stmt) {
 			return NULL;
 		}
 		it = mp_encode_str(it, field_type_strs[ftp],
-			strlen(field_type_strs[ftp]));
+				   strlen(field_type_strs[ftp]));
 	}
 	size = it - msg_data;
 	return msg_data;
@@ -1324,7 +1310,7 @@ insert_new_table_as_space(Table *table, const char *crt_stmt) {
 	}
 	id_max += 5;
 	table->tnum = make_space_id(id_max);
-	msg_data = make_msgpuck_from((const Table *)table, msg_size, crt_stmt);
+	msg_data = make_msgpuck_from_table((const Table *)table, msg_size, crt_stmt);
 	rc = box_insert(BOX_SPACE_ID, msg_data, msg_data + msg_size, NULL);
 	delete[] msg_data;
 	return rc;
@@ -1343,14 +1329,15 @@ insert_new_view_as_space(Table *table, const char *crt_stmt) {
 	}
 	id_max += 5;
 	table->tnum = make_space_id(id_max);
-	msg_data = make_msgpuck_from((const Table *)table, msg_size, crt_stmt);
+	msg_data = make_msgpuck_from_table((const Table *)table, msg_size, crt_stmt);
 	rc = box_insert(BOX_SPACE_ID, msg_data, msg_data + msg_size, NULL);
 	delete[] msg_data;
 	return rc;
 }
 
 int
-insert_new_sindex_as_index(SIndex *index, const char *crt_stmt) {
+insert_new_sindex_as_index(SIndex *index)
+{
 	char *msg_data = NULL;
 	int msg_size;
 	int space_id = get_space_id_from(index->pTable->tnum);
@@ -1362,7 +1349,7 @@ insert_new_sindex_as_index(SIndex *index, const char *crt_stmt) {
 	}
 	id_max++;
 	index->tnum = make_index_id(space_id, id_max);
-	msg_data = make_msgpuck_from((const SIndex *)index, msg_size, crt_stmt);
+	msg_data = make_msgpuck_from_index(index, msg_size);
 	rc = box_insert(BOX_INDEX_ID, msg_data, msg_data + msg_size, NULL);
 	delete[] msg_data;
 	return rc;
@@ -1522,14 +1509,14 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 		if (!strcmp(pname, "temporary") && value.GetBool()) {
 			if (is_temp) *is_temp = true;
 		}
-		if (!strcmp(pname, "view") && value.GetBool()) {
+		if (!strcmp(pname, "is_view") && value.GetBool()) {
 			if (is_view)
 				*is_view = true;
 			local_is_view = true;
 			/* View has not got any tableFlags in sqlite */
 			table->tabFlags = 0;
 		}
-		if (!strcmp(pname, "crt_stmt") && !is_delete) {
+		if (!strcmp(pname, "sql") && !is_delete) {
 			/* we need not to parse crt_stmt_in case of deleting
 			 * view
 			 **/
@@ -2534,7 +2521,7 @@ trntl_nested_insert_into_space(int argc, void *argv_) {
 		}
 	} else if (!strcmp(name, "_index")) {
 		SIndex *index = (SIndex *)argv[2];
-		rc = insert_new_sindex_as_index(index, (char *)argv[3]);
+		rc = insert_new_sindex_as_index(index);
 		if (rc) {
 			say_debug("%s(): error while insering new sindex as index\n", __func__);
 			return SQLITE_ERROR;
