@@ -194,8 +194,8 @@ drop_all_indices(int space_id);
 field_type
 get_tarantool_type_from_sql_aff(int affinity) {
 	switch(affinity) {
-		case SQLITE_AFF_REAL:
-		case SQLITE_AFF_NUMERIC: return FIELD_TYPE_NUMBER;
+		case SQLITE_AFF_REAL: return FIELD_TYPE_NUMBER;
+		case SQLITE_AFF_NUMERIC:
 		case SQLITE_AFF_INTEGER: return FIELD_TYPE_INTEGER;
 		case SQLITE_AFF_TEXT: return FIELD_TYPE_STRING;
 		case SQLITE_AFF_BLOB: return FIELD_TYPE_SCALAR;
@@ -1636,33 +1636,28 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 		if (colname.IsEmpty() || coltype.IsEmpty()) {
 			say_debug("%s(): both name and type must be init\n", __func__);
 		}
-		char c1 = coltype.GetStr()[0];
-		char c2 = coltype.GetStr()[1];
 		const char *sql_type;
+		const char *type = coltype.GetStr();
 		int affinity;
-		if ((c1 == 'N') || (c1 == 'n')) {
-			if (coltype.Size() > 3) {
-				affinity = SQLITE_AFF_NUMERIC;
-				sql_type = "NUMERIC";
-			} else {
-				affinity = SQLITE_AFF_INTEGER;
-				sql_type = "INT";
-			}
-		} else if ((c1 == 's') || (c1 == 'S')) {
-			if ((c2 == 'T') || (c2 == 't')) {
-				affinity = SQLITE_AFF_TEXT;
-				sql_type = "TEXT";
-			} else {
-				affinity = SQLITE_AFF_BLOB;
-				sql_type = "BLOB";
-			}
-		} else if ((c1 == 'A') || (c1 == 'a')) {
-			affinity = SQLITE_AFF_BLOB;
-			sql_type = "BLOB";
-		} else if ((c1 == 'i') || (c1 == 'I')) {
+		if (strcasecmp(type, "number") == 0) {
+
+			affinity = SQLITE_AFF_REAL;
+			sql_type = "REAL";
+		} else if (strcasecmp(type, "int") == 0 ||
+			   strcasecmp(type, "integer") == 0 ||
+			   strcasecmp(type, "uint") == 0 ||
+			   strcasecmp(type, "unsigned") == 0 ||
+			   strcasecmp(type, "num") == 0) {
+
 			affinity = SQLITE_AFF_INTEGER;
 			sql_type = "INT";
+		} else if (strcasecmp(type, "string") == 0 ||
+			   strcasecmp(type, "str") == 0) {
+
+			affinity = SQLITE_AFF_TEXT;
+			sql_type = "TEXT";
 		} else {
+
 			affinity = SQLITE_AFF_BLOB;
 			sql_type = "BLOB";
 		}
