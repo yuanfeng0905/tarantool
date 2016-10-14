@@ -114,7 +114,8 @@ int CalculateHeaderSize(size_t h) {
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ T A R A N T O O L   C U R S O R ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 bool TarantoolCursor::make_btree_cell_from_tuple() {
-	if (tpl == NULL) return false;
+	if (tpl == NULL)
+		return false;
 	size = 0;
 	int cnt = box_tuple_field_count(tpl);
 	MValue *fields = new MValue[cnt];
@@ -235,9 +236,11 @@ bool TarantoolCursor::make_btree_cell_from_tuple() {
 				break;
 			}
 			default: break;
-		}		
+		}
 	}
 	size = header_size + data_size;
+	delete[] fields;
+	delete[] serial_types;
 	return true;
 }
 
@@ -711,8 +714,10 @@ int TarantoolCursor::MoveToUnpacked(UnpackedRecord *pIdxKey, i64 intKey, int *pR
 		return SQLITE_ERROR;
 	} else {
 		bool reversed = *pRes < 0;
-		if (reversed) rc = this->MoveToLast(pRes);
-		else rc = this->MoveToFirst(pRes);
+		if (reversed)
+			rc = this->MoveToLast(pRes);
+		else
+			rc = this->MoveToFirst(pRes);
 		if (!tpl) {
 			if (original) original->eState = CURSOR_INVALID;
 			*pRes = -1;

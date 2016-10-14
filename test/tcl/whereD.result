@@ -33,7 +33,5 @@ whereD-4.6... Ok
 whereD-4.7... Ok
 whereD-5.1... Ok
 whereD-5.2... Ok
-whereD-5.3...
-Error: unknown error
-1 errors out of 37 tests
-Failures on these tests: whereD-5.3
+whereD-5.3... Ok
+0 errors out of 37 tests

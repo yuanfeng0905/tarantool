@@ -1361,6 +1361,7 @@ insert_trigger(Trigger *trigger, char *crt_stmt) {
 
 	Hash *tblHash = &trigger->pSchema->tblHash;
 	Table *table = (Table *)sqlite3HashFind(tblHash, trigger->table);
+	char crt_stmt_full[BOX_SQL_STMT_MAX];
 
 	if (!table) {
 		say_debug("%s(): error while getting id of space\n", __func__);
@@ -1371,10 +1372,10 @@ insert_trigger(Trigger *trigger, char *crt_stmt) {
 	uint32_t max_id = get_max_id_of_trigger(space_id);
 	uint32_t new_id = max_id + 1;
 
-	uint32_t create_len = 15; //15 = strlen("CREATE TRIGGER ")
-	uint32_t full_stmt_len = create_len + strlen(crt_stmt);
-	char *crt_stmt_full = new char[full_stmt_len];
-	sprintf(crt_stmt_full, "CREATE TRIGGER %s", crt_stmt);
+	static const char *create = "CREATE TRIGGER %s";
+
+	int full_stmt_len = snprintf(crt_stmt_full, BOX_SQL_STMT_MAX,
+				     create, crt_stmt);
 
 	bool is_temp = (iDb == 1);
 
@@ -2401,8 +2402,10 @@ remove_cursor_from_global(sql_trntl_self *self, BtCursor *cursor) {
 	self->cnt_cursors--;
 	if (self->cnt_cursors)
 		self->cursors = new_cursors;
-	else
+	else {
 		self->cursors = nullptr;
+		delete[] new_cursors;
+	}
 	delete c;
 	sqlite3DbFree(get_global_db(), cursor->pKey);
 	cursor->pKey = 0;

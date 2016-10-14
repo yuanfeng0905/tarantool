@@ -200,4 +200,4 @@ catchsql { pragma recursive_triggers = off }
 # catchsql { DROP TABLE tbl2; }
 # catchsql { DROP VIEW tbl_view; }
 
-# finish_test
+finish_test
