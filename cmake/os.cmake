@@ -52,7 +52,7 @@ elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
     # Since our dynamic libraries aren't intended for static linking,
     # this is pretty much irrelevant. Disable CMake rpath features
     # altogether. Suppresses a few warnings.
-    set(CMAKE_SKIP_RPATH true)
+    # set(CMAKE_SKIP_RPATH true)
 else()
     message (FATAL_ERROR "Unsupported platform -- ${CMAKE_SYSTEM_NAME}")
 endif()
