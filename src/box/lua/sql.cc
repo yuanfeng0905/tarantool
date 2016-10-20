@@ -584,7 +584,6 @@ on_commit_space(struct trigger * /*trigger*/, void * event) {
 			sqlite3DbFree(get_global_db(), ptr->zName);
 			for (int i = 0; i < ptr->nCol; ++i) {
 				sqlite3DbFree(get_global_db(), ptr->aCol[i].zName);
-				sqlite3DbFree(get_global_db(), ptr->aCol[i].zType);
 			}
 			sqlite3DbFree(get_global_db(), ptr->aCol);
 			sqlite3DbFree(get_global_db(), ptr);
@@ -684,7 +683,7 @@ on_commit_index(struct trigger * /*trigger*/, void * event) {
 		}
 		remove_old_index_from_self(self, cur);
 		for (int i = 0; i < table->nCol; ++i) {
-			sqlite3DbFree(db, index->azColl[i]);
+			sqlite3DbFree(db, (void *) index->azColl[i]);
 		}
 		sqlite3DbFree(db, index);
 		if (!ok) {
@@ -693,7 +692,7 @@ on_commit_index(struct trigger * /*trigger*/, void * event) {
 		}
 		sqlite3HashInsert(idxHash, cur->zName, NULL);
 		for (int i = 0; i < table->nCol; ++i) {
-			sqlite3DbFree(db, cur->azColl[i]);
+			sqlite3DbFree(db, (void *) cur->azColl[i]);
 		}
 		sqlite3DbFree(db, cur);
 	}
@@ -1589,7 +1588,6 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 		for (int i = 0; i < nCol; ++i) {
 			Column *cur = cols.get() + i;
 			sqlite3DbFree(db_alloc, cur->zName);
-			sqlite3DbFree(db_alloc, cur->zType);
 		}
 	};
 	for (uint32_t i = 0; i < len; ++i) {
@@ -1657,9 +1655,6 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 		memcpy(cur->zName, colname.GetStr(), len);
 
 		len = strlen(sql_type);
-		cur->zType = (char *)sqlite3DbMallocZero(db_alloc, len + 1);
-		memset(cur->zType, 0, len + 1);
-		memcpy(cur->zType, sql_type, len);
 		cur->affinity = affinity;
 	}
 	table->aCol = cols.take_away();
@@ -1797,11 +1792,11 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db, Table *table, bo
 	index->onError = OE_None;
 	for (int j = 0; j < table->nCol; ++j) {
 		index->azColl[j] = reinterpret_cast<char *>(sqlite3DbMallocZero(db, sizeof(char) * (strlen("BINARY") + 1)));
-		memcpy(index->azColl[j], "BINARY", strlen("BINARY"));
+		memcpy((void *) index->azColl[j], "BINARY", strlen("BINARY"));
 	}
 	auto free_index_azColls = [&]() {
 		for (int j = 0; j < table->nCol; ++j) {
-			sqlite3DbFree(db, index->azColl[j]);
+			sqlite3DbFree(db, (void *) index->azColl[j]);
 		}
 	};
 
@@ -1998,7 +1993,6 @@ get_trntl_spaces(void *self_, sqlite3 *db, char **pzErrMsg, Schema *pSchema,
 				sqlite3DbFree(db, ptr->zName);
 				for (i = 0; i < ptr->nCol; ++i) {
 					sqlite3DbFree(db, ptr->aCol[i].zName);
-					sqlite3DbFree(db, ptr->aCol[i].zType);
 				}
 				sqlite3DbFree(db, ptr->aCol);
 				sqlite3DbFree(db, ptr);
@@ -2065,7 +2059,7 @@ __get_trntl_spaces_index_bad:
 			if (index->aiColumn) sqlite3DbFree(db, index->aiColumn);
 			if (index->azColl) {
 				for (uint32_t j = 0; j < index->nColumn; ++j) {
-					sqlite3DbFree(db, index->azColl[j]);
+					sqlite3DbFree(db, (void *) index->azColl[j]);
 				}
 				sqlite3DbFree(db, index->azColl);
 			}

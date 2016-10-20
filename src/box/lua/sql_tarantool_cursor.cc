@@ -42,7 +42,8 @@ int GetSerialTypeNum(u64 number) {
 	memset(&mem, 0, sizeof(Mem));
 	mem.u.i = number;
 	mem.flags = MEM_Int;
-	return sqlite3VdbeSerialType(&mem, 1);
+	u32 len;
+	return sqlite3VdbeSerialType(&mem, 1, &len);
 }
 
 int GetSerialTypeNum(double) {
