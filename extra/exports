@@ -1,9 +1,6 @@
 # Symbols exported by the main Tarantool executable
 
-# SQL
-
-prepare_to_open_db
-connect_triggers
+tntsql_api
 
 # FFI
 

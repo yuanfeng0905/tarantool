@@ -64,6 +64,7 @@
 #include "xrow.h"
 #include "xrow_io.h"
 #include "authentication.h"
+#include "sql.h"
 
 static char status[64] = "unknown";
 
@@ -1213,6 +1214,7 @@ box_free(void)
 #if 0
 		session_free();
 		cluster_free();
+		sql_free();
 		user_cache_free();
 		schema_free();
 		tuple_free();
@@ -1369,6 +1371,7 @@ box_init(void)
 	session_init();
 
 	cluster_init();
+	sql_init();
 
 	title("loading");
 

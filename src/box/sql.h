@@ -1,7 +1,7 @@
-#ifndef INCLUDES_TARANTOOL_LUA_SQLITE_H
-#define INCLUDES_TARANTOOL_LUA_SQLITE_H
+#ifndef INCLUDES_BOX_SQL_H
+#define INCLUDES_BOX_SQL_H
 /*
- * Copyright 2010-2015, Tarantool AUTHORS, please see AUTHORS file.
+ * Copyright 2010-2016, Tarantool AUTHORS, please see AUTHORS file.
  *
  * Redistribution and use in source and binary forms, with or
  * without modification, are permitted provided that the following
@@ -31,7 +31,7 @@
  * SUCH DAMAGE.
  */
 
-#ifdef __cplusplus
+#if defined(__cplusplus)
 extern "C" {
 #endif
 
@@ -39,8 +39,28 @@ struct lua_State;
 
 void box_lua_sqlite_init(struct lua_State *L);
 
-#ifdef __cplusplus
-}
+void
+sql_init();
+
+void
+sql_free();
+
+/*
+ * struct sqlite3 *
+ * sql_get();
+ *
+ * Currently, this is the only SQL execution interface provided.
+ * If not yet initialised, returns NULL.
+ * Use the regular sqlite3_* API with this handle, but
+ * don't do anything finicky like sqlite3_close.
+ * Behind the scenes, this sqlite was rigged to use Tarantool
+ * as a data source.
+ */
+struct sqlite3 *
+sql_get();
+
+#if defined(__cplusplus)
+} /* extern "C" { */
 #endif
 
 #endif

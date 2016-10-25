@@ -66,6 +66,9 @@ add_library(box STATIC
     applier.cc
     relay.cc
     wal.cc
+    sql.cc
+    sql_mvalue.cc
+    sql_tarantool_cursor.cc
     ${lua_sources}
     lua/init.c
     lua/call.c
@@ -80,10 +83,8 @@ add_library(box STATIC
     lua/error.cc
     lua/session.c
     lua/net_box.c
-    lua/sql.cc
-    lua/sql_mvalue.cc
-    lua/sql_tarantool_cursor.cc
     lua/space_iterator.cc
+    lua/sql.c
     ${bin_sources})
 
 # Currently, sqlite is grafted in a somewhat hackish way.
@@ -92,9 +93,10 @@ add_library(box STATIC
 # Also sqlite headers should implicily include trivia/config.h to
 # be consistent with our custom sqlite library build.
 set_source_files_properties(
-    lua/sql.cc
-    lua/sql_mvalue.cc
-    lua/sql_tarantool_cursor.cc
+    sql.cc
+    lua/sql.c
+    sql_mvalue.cc
+    sql_tarantool_cursor.cc
     PROPERTY COMPILE_FLAGS "\
 -D_HAVE_SQLITE_CONFIG_H=1 \
 -I${PROJECT_BINARY_DIR}/src/trivia \
