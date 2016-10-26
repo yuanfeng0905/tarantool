@@ -27,17 +27,22 @@ struct prep_stmt_list
 	/* uint8_t mem_pool[] */
 };
 
+static inline int
+prep_stmt_list_needs_free(struct prep_stmt_list *l)
+{
+	return (uint8_t *)(l + 1) != l->mem_end;
+}
+
 /* Release resources and free the list itself, unless it was preallocated
  * (i.e. l points to an automatic variable) */
 static void
-prep_stmt_list_free(struct prep_stmt_list *l,
-		    struct prep_stmt_list *prealloc)
+prep_stmt_list_free(struct prep_stmt_list *l)
 {
 	if (l == NULL)
 		return;
 	for (size_t i = 0, n = l->stmt_count; i < n; i++)
 		sqlite3_finalize(l->stmt[i].stmt);
-	if (l != prealloc)
+	if (prep_stmt_list_needs_free(l))
 		free(l);
 }
 
@@ -58,8 +63,7 @@ prep_stmt_list_init(struct prep_stmt_list *prealloc)
  * intact and a new memory chunk is allocated. */
 static void *
 prep_stmt_list_palloc(struct prep_stmt_list **pl,
-		      size_t size, size_t alignment,
-		      struct prep_stmt_list *prealloc)
+		      size_t size, size_t alignment)
 {
 	assert((alignment & (alignment - 1)) == 0); /* 2 ^ k */
 	assert(alignment <= alignof(l->stmt[0]));
@@ -84,18 +88,22 @@ prep_stmt_list_palloc(struct prep_stmt_list **pl,
 			assert(SIZE_MAX - size >= size);
 			size += size;
 		}
-		if (l == prealloc)
-			l = malloc(size);
-		else
+		if (prep_stmt_list_needs_free(l)) {
 			l = realloc(l, size);
-		if (l == NULL)
-			return NULL;
-		*pl = l;
+			if (l == NULL)
+				return NULL;
+		} else {
+			l = malloc(size);
+			if (l == NULL)
+				return NULL;
+			memcpy(l, *pl, prev_size);
+		}
 		l->mem_end = (uint8_t *)l + size;
 		/* move the pool data */
 		memmove((uint8_t *)l + prev_size - l->pool_size,
 			l->mem_end - l->pool_size,
 			l->pool_size);
+		*pl = l;
 	}
 
 	l->pool_size = pool_size;
@@ -107,66 +115,16 @@ prep_stmt_list_palloc(struct prep_stmt_list **pl,
  * If reallocation is needed but l was preallocated, old mem is left
  * intact and a new memory chunk is allocated. */
 static struct prep_stmt *
-prep_stmt_list_push(struct prep_stmt_list **pl,
-		    struct prep_stmt_list *prealloc)
+prep_stmt_list_push(struct prep_stmt_list **pl)
 {
 	struct prep_stmt_list *l;
 	/* make sure we don't collide with the pool */
-	if (prep_stmt_list_palloc(pl, sizeof(l->stmt[0]), 1,
-				  prealloc) == NULL)
+	if (prep_stmt_list_palloc(pl, sizeof(l->stmt[0]), 1
+				  ) == NULL)
 		return NULL;
 	l = *pl;
 	l->pool_size -= sizeof(l->stmt[0]);
 	return l->stmt + (l->stmt_count++);
-}
-
-/* Create prep_stmt_list from sql statement(s).
- * Memory for the resulting list may be malloc-ed
- * unless the result fits in prealloc-ed object. */
-static int
-prep_stmt_list_create(struct prep_stmt_list **pl,
-		      struct sqlite3 *db,
-		      const char *sql, size_t length,
-		      struct prep_stmt_list *prealloc)
-{
-	int rc;
-	assert(length <= INT_MAX);
-	const char *sql_end = sql + length;
-	struct prep_stmt_list *l = prep_stmt_list_init(prealloc);
-	while (sql != sql_end) {
-		struct prep_stmt *ps = prep_stmt_list_push(&l, prealloc);
-		int column_count;
-		if (ps == NULL) {
-			rc = SQLITE_NOMEM;
-			goto error;
-		}
-		rc = sqlite3_prepare_v2(db, sql, (int)(sql_end - sql),
-					&ps->stmt, &sql);
-		if (rc != SQLITE_OK)
-			goto error;
-		if (ps->stmt == NULL) {
-			/* only whitespace */
-			assert(sql == sql_end);
-			l->stmt_count --;
-			break;
-		}
-		column_count = sqlite3_column_count(ps->stmt);
-		if (column_count != 0) {
-			l->last_select_stmt_index = l->stmt_count - 1;
-			l->column_count = column_count;
-		}
-	}
-	/* reserve char[column_count] for a typestr */
-	assert(l->pool_size == 0);
-	if (prep_stmt_list_palloc(&l, l->column_count, 1, prealloc) == NULL) {
-		rc = SQLITE_NOMEM;
-		goto error;
-	}
-	*pl = l;
-	return SQLITE_OK;
-error:
-	prep_stmt_list_free(l, prealloc);
-	return rc;
 }
 
 static void
@@ -238,30 +196,54 @@ lua_sql_execute(struct lua_State *L)
 {
 	int rc;
 	sqlite3 *db = sql_get();
-	struct prep_stmt_list *l = NULL, prealloc;
-	size_t len;
-	const char *sql;
+	struct prep_stmt_list *l = NULL, stock_l;
+	size_t length;
+	const char *sql, *sql_end;
 
 	if (db == NULL)
 		return luaL_error(L, "not ready");
 
-	sql = lua_tolstring(L, 1, &len);
+	sql = lua_tolstring(L, 1, &length);
 	if (sql == NULL)
 		return luaL_error(L, "usage: box.sql.execute(sqlstring)");
 
-	rc = prep_stmt_list_create(&l, db, sql, len, &prealloc);
-	switch (rc) {
-	case SQLITE_OK:
-		break;
-	case SQLITE_NOMEM:
-		goto outofmem;
-	default:
-		goto sqlerror;
-	}
+	assert(length <= INT_MAX);
+	sql_end = sql + length;
 
-	for (uint32_t i = 0, n = l->stmt_count; i < n; i++) {
-		sqlite3_stmt *stmt = l->stmt[i].stmt;
-		if (i == l->last_select_stmt_index) {
+	l = prep_stmt_list_init(&stock_l);
+	while (sql != sql_end) {
+
+		struct prep_stmt *ps = prep_stmt_list_push(&l);
+		if (ps == NULL)
+			goto outofmem;
+		rc = sqlite3_prepare_v2(db, sql, (int)(sql_end - sql),
+					&ps->stmt, &sql);
+		if (rc != SQLITE_OK)
+			goto sqlerror;
+
+		if (ps->stmt == NULL) {
+			/* only whitespace */
+			assert(sql == sql_end);
+			l->stmt_count --;
+			break;
+		}
+
+		int column_count = sqlite3_column_count(ps->stmt);
+		if (column_count == 0) {
+			while ((rc = sqlite3_step(ps->stmt)) == SQLITE_ROW) { ; }
+			if (rc != SQLITE_OK && rc != SQLITE_DONE)
+				goto sqlerror;
+		} else {
+			char *typestr;
+			l->column_count = column_count;
+			l->last_select_stmt_index = l->stmt_count - 1;
+
+			assert(l->pool_size == 0);
+			typestr = prep_stmt_list_palloc(&l, column_count, 1);
+			if (typestr == NULL)
+				goto outofmem;
+
+			lua_settop(L, 1); /* discard any results */
 
 			/* create result table */
 			lua_createtable(L, 7, 0);
@@ -271,7 +253,7 @@ lua_sql_execute(struct lua_State *L)
 			lua_rawseti(L, -2, 0);
 
 			int row_count = 0;
-			while ((rc = sqlite3_step(stmt) == SQLITE_ROW)) {
+			while ((rc = sqlite3_step(ps->stmt) == SQLITE_ROW)) {
 				lua_push_row(L, l);
 				row_count++;
 				lua_rawseti(L, -2, row_count);
@@ -279,21 +261,18 @@ lua_sql_execute(struct lua_State *L)
 
 			if (rc != SQLITE_OK)
 				goto sqlerror;
-		} else {
-			while ((rc = sqlite3_step(stmt) == SQLITE_ROW));
-			if (rc != SQLITE_OK)
-				goto sqlerror;
+
+			l->pool_size = 0;
 		}
 	}
-	rc = l->last_select_stmt_index != UINT32_MAX;
-	prep_stmt_list_free(l, &prealloc);
-	return rc;
+	prep_stmt_list_free(l);
+	return lua_gettop(L) - 1;
 sqlerror:
-	prep_stmt_list_free(l, &prealloc);
+	prep_stmt_list_free(l);
 	lua_pushstring(L, sqlite3_errmsg(db));
 	return lua_error(L);
 outofmem:
-	prep_stmt_list_free(l, &prealloc);
+	prep_stmt_list_free(l);
 	return luaL_error(L, "out of memory");
 }
 
