@@ -306,7 +306,13 @@ on_commit_space(struct trigger *trigger, void *event)
 	if (new_tuple != NULL) {
 		say_debug("%s(): new_tuple != NULL", __func__);
 		Table *table = get_trntl_table_from_tuple(new_tuple, db,
-		pSchema, &is_temp, &is_view);
+							  pSchema,
+							  &is_temp,
+							  &is_view);
+		if (table == NULL) {
+			say_debug("%s(): error while getting table", __func__);
+			return;
+		}
 		if (is_temp) {
 			tblHash = &db->aDb[1].pSchema->tblHash;
 			pSchema = db->aDb[1].pSchema;
@@ -378,16 +384,16 @@ on_commit_index(struct trigger *trigger, void *event)
 				break;
 			}
 		}
-		state_remove_index(state, cur);
-		for (int i = 0; i < table->nCol; ++i) {
-			sqlite3DbFree(db, index->azColl[i]);
-		}
-		sqlite3DbFree(db, index);
 		if (!ok) {
 			say_debug("%s(): index was not found "
 				  "in sql schema", __func__);
 			return;
 		}
+		state_remove_index(state, cur);
+		for (int i = 0; i < table->nCol; ++i) {
+			sqlite3DbFree(db, index->azColl[i]);
+		}
+		sqlite3DbFree(db, index);
 		sqlite3HashInsert(idxHash, cur->zName, NULL);
 		for (int i = 0; i < table->nCol; ++i) {
 			sqlite3DbFree(db, cur->azColl[i]);
@@ -1024,7 +1030,8 @@ get_trntl_table_from_tuple(box_tuple_t *tpl, sqlite3 *db,
 	bool local_is_view = false;
 
 	data = box_tuple_field(tpl, 5);
-	uint32_t map_size = mp_decode_map(&data);
+	uint32_t map_size = mp_typeof(*data) == MP_MAP ?
+		mp_decode_map(&data) : 0;
 	Vdbe *v;
 	Table *pstmtTable = NULL;
 	for (uint32_t i = 0; i < map_size; ++i) {
@@ -1261,8 +1268,12 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db,
 				bool *is_temp = (bool *)(argv[0]);
 				MValue *space_name = (MValue *)argv[1];
 				const char *data;
+				data = box_tuple_field(tpl, 2);
+				*space_name = MValue::FromMSGPuck(&data);
+				if (box_tuple_field_count(tpl) != 7)
+					return 0;
 				data = box_tuple_field(tpl, 5);
-				uint32_t map_size = mp_decode_map(&data);
+				uint32_t map_size = mp_typeof(*data) == MP_MAP ? mp_decode_map(&data) : 0;
 				for (uint32_t i = 0; i < map_size; ++i) {
 					MValue name = MValue::FromMSGPuck(&data);
 					MValue value = MValue::FromMSGPuck(&data);
@@ -1272,8 +1283,6 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db,
 						break;
 					}
 				}
-				data = box_tuple_field(tpl, 2);
-				*space_name = MValue::FromMSGPuck(&data);
 				return 0;
 			};
 		SpaceIterator iterator(2, params, callback, BOX_SPACE_ID,
@@ -1403,7 +1412,7 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db,
 	/* UNIQUE */
 
 	data = box_tuple_field(index_tpl, 4);
-	int map_size = mp_decode_map(&data);
+	int map_size = mp_typeof(*data) == MP_MAP ? mp_decode_map(&data) : 0;
 	if (map_size > 3) {
 		say_debug("%s(): field[4] map size in INDEX "
 			  "must be <= 3, but is %u", __func__, map_size);
@@ -1436,12 +1445,17 @@ get_trntl_index_from_tuple(box_tuple_t *index_tpl, sqlite3 *db,
 	data = box_tuple_field(index_tpl, 5);
 	MValue idx_cols = MValue::FromMSGPuck(&data);
 	if (idx_cols.GetType() != MP_ARRAY) {
-		say_debug("%s(): field[5] in INDEX must be array, "
+		say_debug("%s(): field[5] in INDEX must be an array, "
 			  "but type is %d", __func__, idx_cols.GetType());
 		free_index_azColls();
 		return NULL;
 	}
 	index->nKeyCol = idx_cols.Size();
+	if (index->nKeyCol > table->nCol) {
+		index->nKeyCol = 0;
+		ok = true;
+		return index.release();
+	}
 	for (int j = 0, sz = idx_cols.Size(); j < sz; ++j) {
 		i16 num = idx_cols[j][0][0]->GetUint64();
 		index->aiColumn[j] = num;
