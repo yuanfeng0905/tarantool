@@ -298,6 +298,8 @@ daemonize()
 		master_pid = getpid();
 		break;
 	default:                                    /* parent */
+		/* Tell systemd about new main program using */
+		sd_notifyf(0, "MAINPID=%lu", (unsigned long) pid);
 		master_pid = pid;
 		exit(EXIT_SUCCESS);
 	}
@@ -638,6 +640,10 @@ main(int argc, char **argv)
 		start_loop = start_loop && ev_activecnt(loop()) > events;
 		region_free(&fiber()->gc);
 		if (start_loop) {
+			/* Tell systemd, that we've entered the event loop */
+			sd_notifyf(0, "READY=1\nMAINPID=%lu\n"
+				      "STATUS=entering the event loop",
+				      (unsigned long) getpid());
 			say_crit("entering the event loop");
 			ev_now_update(loop());
 			ev_run(loop(), 0);
@@ -645,6 +651,7 @@ main(int argc, char **argv)
 	} catch (struct error *e) {
 		error_log(e);
 		panic("%s", "fatal error, exiting the event loop");
+		sd_notifyf(0, "Failed to startup: %s", box_error_message(e));
 	} catch (...) {
 		/* This can only happen in case of a server bug. */
 		panic("unknown exception");

@@ -93,6 +93,19 @@
 #endif
 
 /*
+ * Defined if this OS has systemd headers with sd_notifyf()
+ */
+#cmakedefine HAVE_SD_NOTIFYF 1
+
+#ifdef HAVE_SD_NOTIFYF
+#  include <systemd/sd-daemon.h>
+#else
+#  define sd_notify(...)
+#  define sd_notifyf(...)
+#endif
+
+
+/*
  * Defined if this platform has BSD specific funopen()
  */
 #cmakedefine HAVE_FUNOPEN 1

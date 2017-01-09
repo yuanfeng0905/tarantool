@@ -39,7 +39,8 @@ Documentation=man:tarantool(1)
 ConditionPathExists=@TARANTOOL_INSTANCEDIR@/%I.lua
 
 [Service]
-Type=forking
+Type=notify
+NotifyAccess=all
 User=@TARANTOOL_USER@
 Group=@TARANTOOL_USER@
 # Disable OOM killer

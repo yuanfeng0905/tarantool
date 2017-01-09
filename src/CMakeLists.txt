@@ -11,6 +11,7 @@ include_directories(${LUAJIT_INCLUDE_DIRS})
 include_directories(${READLINE_INCLUDE_DIRS})
 include_directories(${LIBYAML_INCLUDE_DIRS})
 include_directories(${MSGPUCK_INCLUDE_DIRS})
+include_directories(${SYSTEMD_INCLUDE_DIR})
 
 set(LIBUTIL_FREEBSD_SRC ${CMAKE_SOURCE_DIR}/third_party/libutil_freebsd)
 include_directories(${LIBUTIL_FREEBSD_SRC})
@@ -82,6 +83,7 @@ target_link_libraries(core
     salad small pthread
     ${LIBEV_LIBRARIES}
     ${LIBCORO_LIBRARIES}
+    ${SYSTEMD_LIBRARIES}
 )
 
 set (server_sources
