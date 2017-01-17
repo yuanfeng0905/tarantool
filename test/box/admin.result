@@ -71,6 +71,8 @@ cfg_filter(box.cfg)
         - 1073741824
       - - threads
         - 1
+      - - timeout
+        - 60
   - - vinyl_dir
     - <hidden>
   - - wal_dir

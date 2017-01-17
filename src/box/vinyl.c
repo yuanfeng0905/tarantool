@@ -106,6 +106,8 @@ struct vy_conf {
 	char *path;
 	/* memory */
 	uint64_t memory_limit;
+	/* quota timeout */
+	double timeout;
 };
 
 struct vy_env {
@@ -3702,11 +3704,15 @@ vy_scheduler_quota_watermark_cb(void *arg)
 	ipc_cond_signal(&scheduler->scheduler_cond);
 }
 
-static void
-vy_scheduler_quota_throttle_cb(void *arg)
+static double
+vy_scheduler_quota_throttle_cb(void *arg, double timeout)
 {
 	struct vy_scheduler *scheduler = arg;
-	ipc_cond_wait(&scheduler->quota_cond);
+	ev_tstamp wait_start = ev_now(loop());
+	if (ipc_cond_wait_timeout(&scheduler->quota_cond, timeout) < 0)
+		return 0; /* timed out */
+	ev_tstamp wait_end = ev_now(loop());
+	return timeout - (wait_end - wait_start);
 }
 
 static void
@@ -4229,6 +4235,7 @@ vy_conf_new()
 		return NULL;
 	}
 	conf->memory_limit = cfg_getd("vinyl.memory_limit")*1024*1024*1024;
+	conf->timeout = cfg_getd("vinyl.timeout");
 
 	conf->path = strdup(cfg_gets("vinyl_dir"));
 	if (conf->path == NULL) {
@@ -5906,9 +5913,7 @@ vy_rollback(struct vy_env *e, struct vy_tx *tx)
 int
 vy_prepare(struct vy_env *e, struct vy_tx *tx)
 {
-	/* prepare transaction */
 	assert(tx->state == VINYL_TX_READY);
-	int rc = 0;
 
 	/* Reserve quota before trying to allocate memory. */
 	if (tx->write_size > 0) {
@@ -5938,25 +5943,23 @@ vy_prepare(struct vy_env *e, struct vy_tx *tx)
 		n_extents += 3;
 		tx->write_size += (tx->index_count * n_extents *
 				   VY_MEM_TREE_EXTENT_SIZE);
-		vy_quota_use(&e->quota, tx->write_size);
+		if (vy_quota_use(&e->quota, tx->write_size) != 0)
+			goto fail;
 	}
 
-	/* proceed read-only transactions */
 	if (!vy_tx_is_ro(tx) && tx->is_aborted) {
-		tx->state = VINYL_TX_ROLLBACK;
 		e->stat->tx_conflict++;
 		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
-		rc = -1;
-	} else {
-		tx->state = VINYL_TX_COMMIT;
-		/** Abort read/write intersection */
-		struct txv *v = write_set_first(&tx->write_set);
-		for (; v != NULL; v = write_set_next(&tx->write_set, v))
-			txv_abort_all(e, tx, v);
+		goto fail;
 	}
 
-	tx_manager_end(tx->manager, tx);
+	/* Abort read/write intersection. */
+	for (struct txv *v = write_set_first(&tx->write_set);
+	     v != NULL; v = write_set_next(&tx->write_set, v))
+		txv_abort_all(e, tx, v);
 
+	tx->state = VINYL_TX_COMMIT;
+	tx_manager_end(tx->manager, tx);
 	/*
 	 * A half committed transaction is no longer
 	 * being part of concurrent index, but still can be
@@ -5964,7 +5967,11 @@ vy_prepare(struct vy_env *e, struct vy_tx *tx)
 	 * Yet, it is important to maintain external
 	 * serial commit order.
 	 */
-	return rc;
+	return 0;
+fail:
+	tx->state = VINYL_TX_ROLLBACK;
+	tx_manager_end(tx->manager, tx);
+	return -1;
 }
 
 int
@@ -6160,7 +6167,7 @@ vy_env_new(void)
 	lsregion_create(&e->allocator, slab_cache->arena);
 	tt_pthread_key_create(&e->zdctx_key, vy_free_zdctx);
 
-	vy_quota_init(&e->quota, e->conf->memory_limit,
+	vy_quota_init(&e->quota, e->conf->memory_limit, e->conf->timeout,
 		      vy_scheduler_quota_watermark_cb,
 		      vy_scheduler_quota_throttle_cb,
 		      vy_scheduler_quota_release_cb, e->scheduler);

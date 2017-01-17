@@ -55,10 +55,19 @@ struct vy_quota {
 	size_t watermark;
 	/** Current memory consumption. */
 	size_t used;
+	/** Maximal time to wait for quota to release, in seconds. */
+	double timeout;
 	/** Called when quota is consumed and used >= watermark. */
 	void (*watermark_cb)(void *arg);
-	/** Called when quota is consumed and used >= limit. */
-	void (*throttle_cb)(void *arg);
+	/**
+	 * Called when quota is consumed and used >= limit.
+	 *
+	 * This function is supposed to put the current fiber to
+	 * sleep until release_cb() wakes it up. It is passed the
+	 * maximal time to wait. It should return the time left
+	 * or 0 on timeout.
+	 */
+	double (*throttle_cb)(void *arg, double timeout);
 	/** Called when quota is released and used < limit. */
 	void (*release_cb)(void *arg);
 	/** Argument passed to cb. */
@@ -66,14 +75,15 @@ struct vy_quota {
 };
 
 static inline void
-vy_quota_init(struct vy_quota *q, int64_t limit,
+vy_quota_init(struct vy_quota *q, int64_t limit, double timeout,
 	      void (*watermark_cb)(void *arg),
-	      void (*throttle_cb)(void *arg),
+	      double (*throttle_cb)(void *arg, double timeout),
 	      void (*release_cb)(void *arg), void *cb_arg)
 {
 	q->limit = limit;
 	q->watermark = limit;
 	q->used = 0;
+	q->timeout = timeout;
 	q->watermark_cb = watermark_cb;
 	q->throttle_cb = throttle_cb;
 	q->release_cb = release_cb;
@@ -114,15 +124,20 @@ vy_quota_update_watermark(struct vy_quota *q, size_t chunk_size,
 /**
  * Consume @size bytes of memory. Throttle the caller if
  * the limit is exceeded.
+ *
+ * Returns 0 on success, -1 on timeout, in which case
+ * throttle_cb() is responsible for setting diag.
  */
-static inline void
+static inline int
 vy_quota_use(struct vy_quota *q, size_t size)
 {
 	q->used += size;
 	if (q->used >= q->watermark)
 		q->watermark_cb(q->cb_arg);
-	while (q->used >= q->limit)
-		q->throttle_cb(q->cb_arg);
+	double timeout = q->timeout;
+	while (q->used >= q->limit && timeout > 0)
+		timeout = q->throttle_cb(q->cb_arg, timeout);
+	return timeout > 0 ? 0 : -1;
 }
 
 /**

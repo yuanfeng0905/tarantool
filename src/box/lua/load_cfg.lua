@@ -7,6 +7,7 @@ local private = require('box.internal')
 -- see default_cfg below
 local default_vinyl_cfg = {
     memory_limit      = 1.0, -- 1G
+    timeout           = 60, -- seconds
     threads           = 1,
     compact_wm        = 2, -- try to maintain less than 2 runs in a range
     range_size        = 1024 * 1024 * 1024,
@@ -54,6 +55,7 @@ local default_cfg = {
 -- see template_cfg below
 local vinyl_template_cfg = {
     memory_limit      = 'number',
+    timeout           = 'number',
     threads           = 'number',
     compact_wm        = 'number',
     run_prio          = 'number',
