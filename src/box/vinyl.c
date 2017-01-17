@@ -3696,26 +3696,24 @@ static int
 vy_scheduler_f(va_list va);
 
 static void
-vy_scheduler_quota_cb(enum vy_quota_event event, void *arg)
+vy_scheduler_quota_watermark_cb(void *arg)
 {
 	struct vy_scheduler *scheduler = arg;
+	ipc_cond_signal(&scheduler->scheduler_cond);
+}
 
-	if (scheduler->env->status != VINYL_ONLINE)
-		return;
+static void
+vy_scheduler_quota_throttle_cb(void *arg)
+{
+	struct vy_scheduler *scheduler = arg;
+	ipc_cond_wait(&scheduler->quota_cond);
+}
 
-	switch (event) {
-	case VY_QUOTA_EXCEEDED:
-		ipc_cond_signal(&scheduler->scheduler_cond);
-		break;
-	case VY_QUOTA_THROTTLED:
-		ipc_cond_wait(&scheduler->quota_cond);
-		break;
-	case VY_QUOTA_RELEASED:
-		ipc_cond_broadcast(&scheduler->quota_cond);
-		break;
-	default:
-		unreachable();
-	}
+static void
+vy_scheduler_quota_release_cb(void *arg)
+{
+	struct vy_scheduler *scheduler = arg;
+	ipc_cond_broadcast(&scheduler->quota_cond);
 }
 
 static void
@@ -6163,7 +6161,9 @@ vy_env_new(void)
 	tt_pthread_key_create(&e->zdctx_key, vy_free_zdctx);
 
 	vy_quota_init(&e->quota, e->conf->memory_limit,
-		      vy_scheduler_quota_cb, e->scheduler);
+		      vy_scheduler_quota_watermark_cb,
+		      vy_scheduler_quota_throttle_cb,
+		      vy_scheduler_quota_release_cb, e->scheduler);
 	ev_timer_init(&e->quota_timer, vy_env_quota_timer_cb, 0, 1.);
 	e->quota_timer.data = e;
 	ev_timer_start(loop(), &e->quota_timer);

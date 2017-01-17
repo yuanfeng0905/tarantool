@@ -37,18 +37,6 @@
 extern "C" {
 #endif /* defined(__cplusplus) */
 
-enum vy_quota_event {
-	/** Quota is consumed and used >= watermark. */
-	VY_QUOTA_EXCEEDED,
-	/** Quota is consumed and used >= limit. */
-	VY_QUOTA_THROTTLED,
-	/** Quota is released and used < limit. */
-	VY_QUOTA_RELEASED,
-};
-
-typedef void
-(*vy_quota_cb)(enum vy_quota_event event, void *arg);
-
 /**
  * Quota used for accounting and limiting memory consumption
  * in the vinyl engine. It is NOT multi-threading safe.
@@ -67,20 +55,28 @@ struct vy_quota {
 	size_t watermark;
 	/** Current memory consumption. */
 	size_t used;
-	/** Quota callback. */
-	vy_quota_cb cb;
+	/** Called when quota is consumed and used >= watermark. */
+	void (*watermark_cb)(void *arg);
+	/** Called when quota is consumed and used >= limit. */
+	void (*throttle_cb)(void *arg);
+	/** Called when quota is released and used < limit. */
+	void (*release_cb)(void *arg);
 	/** Argument passed to cb. */
 	void *cb_arg;
 };
 
 static inline void
 vy_quota_init(struct vy_quota *q, int64_t limit,
-	      vy_quota_cb cb, void *cb_arg)
+	      void (*watermark_cb)(void *arg),
+	      void (*throttle_cb)(void *arg),
+	      void (*release_cb)(void *arg), void *cb_arg)
 {
 	q->limit = limit;
 	q->watermark = limit;
 	q->used = 0;
-	q->cb = cb;
+	q->watermark_cb = watermark_cb;
+	q->throttle_cb = throttle_cb;
+	q->release_cb = release_cb;
 	q->cb_arg = cb_arg;
 }
 
@@ -124,9 +120,9 @@ vy_quota_use(struct vy_quota *q, size_t size)
 {
 	q->used += size;
 	if (q->used >= q->watermark)
-		q->cb(VY_QUOTA_EXCEEDED, q->cb_arg);
+		q->watermark_cb(q->cb_arg);
 	while (q->used >= q->limit)
-		q->cb(VY_QUOTA_THROTTLED, q->cb_arg);
+		q->throttle_cb(q->cb_arg);
 }
 
 /**
@@ -148,7 +144,7 @@ vy_quota_release(struct vy_quota *q, size_t size)
 	assert(q->used >= size);
 	q->used -= size;
 	if (q->used < q->limit)
-		q->cb(VY_QUOTA_RELEASED, q->cb_arg);
+		q->release_cb(q->cb_arg);
 }
 
 #if defined(__cplusplus)
