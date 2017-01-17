@@ -685,6 +685,15 @@ struct vy_tx {
 	 * the version increments.
 	 */
 	uint32_t write_set_version;
+	/** Number of elements in write_set. */
+	int write_count;
+	/**
+	 * Upper bound of the size of memory needed to commit
+	 * this transaction.
+	 */
+	size_t write_size;
+	/** Number of indexes modified by this transaction. */
+	int index_count;
 	ev_tstamp start;
 	enum tx_type type;
 	enum tx_state state;
@@ -1183,6 +1192,9 @@ vy_tx_begin(struct tx_manager *m, struct vy_tx *tx, enum tx_type type)
 	stailq_create(&tx->log);
 	write_set_new(&tx->write_set);
 	tx->write_set_version = 0;
+	tx->write_count = 0;
+	tx->write_size = 0;
+	tx->index_count = 0;
 	tx->start = ev_now(loop());
 	tx->manager = m;
 	tx->state = VINYL_TX_READY;
@@ -1269,8 +1281,14 @@ static void
 vy_tx_rollback(struct vy_env *e, struct vy_tx *tx)
 {
 	if (tx->state == VINYL_TX_READY) {
-		/** freewill rollback, vy_prepare have not been called yet */
+		/*
+		 * Freewill rollback, vy_prepare() have not
+		 * been called yet.
+		 */
 		tx_manager_end(tx->manager, tx);
+	} else {
+		/* Release quota reserved in vy_prepare(). */
+		vy_quota_release(&e->quota, tx->write_size);
 	}
 	struct txv *v, *tmp;
 	stailq_foreach_entry_safe(v, tmp, &tx->log, next_in_log)
@@ -4941,8 +4959,12 @@ vy_tx_set(struct vy_tx *tx, struct vy_index *index, struct tuple *stmt)
 	assert(vy_stmt_type(stmt) != 0);
 
 	/* Update concurrent index */
-	struct txv *old = write_set_search_key(&tx->write_set, index,
-					       stmt);
+	struct write_set_key key = { .index = index, .stmt = stmt, };
+	struct txv *prev = write_set_psearch(&tx->write_set, &key);
+	struct txv *old = NULL;
+	if (prev != NULL && prev->index == index &&
+	    vy_stmt_compare(prev->stmt, stmt, index->key_def) == 0)
+		old = prev;
 	/* Found a match of the previous action of this transaction */
 	if (old != NULL) {
 		if (vy_stmt_type(stmt) == IPROTO_UPSERT) {
@@ -4969,6 +4991,10 @@ vy_tx_set(struct vy_tx *tx, struct vy_index *index, struct tuple *stmt)
 		v->is_gap = false;
 		write_set_insert(&tx->write_set, v);
 		tx->write_set_version++;
+		tx->write_count++;
+		tx->write_size += tuple_size(stmt);
+		if (prev == NULL || prev->index != index)
+			tx->index_count++;
 		stailq_add_tail_entry(&tx->log, v, next_in_log);
 	}
 	return 0;
@@ -5886,6 +5912,37 @@ vy_prepare(struct vy_env *e, struct vy_tx *tx)
 	assert(tx->state == VINYL_TX_READY);
 	int rc = 0;
 
+	/* Reserve quota before trying to allocate memory. */
+	if (tx->write_size > 0) {
+		/*
+		 * Estimate the maximal size of memory needed for
+		 * allocating BPS tree extents.
+		 *
+		 * An in-memory tree block can contain up to ~60
+		 * elements if it's a leaf node or ~40 otherwise.
+		 * Therefore a tree of depth 6 can store up to
+		 * 40^5 * 60 > 6000M elements, which is more than
+		 * enough. So inserting a single element requires
+		 * 6 tree blocks at max. A tree extent can store
+		 * up to 32 blocks, so a single extent should be
+		 * enough for inserting one element. If an insertion
+		 * triggers an extent allocation, the extent can
+		 * store 32 blocks or at least 32 * 40 > 1000 other
+		 * elements. Hence if we have X insertions into a
+		 * tree, we will need < X / 1000 BPS tree extents.
+		 * Next, each extent is allocated from matras, which
+		 * is a 3-level allocator, so we add 3 to the end
+		 * result.
+		 */
+		int n_extents = tx->write_count / 1000;
+		if (n_extents == 0)
+			n_extents = 1;
+		n_extents += 3;
+		tx->write_size += (tx->index_count * n_extents *
+				   VY_MEM_TREE_EXTENT_SIZE);
+		vy_quota_use(&e->quota, tx->write_size);
+	}
+
 	/* proceed read-only transactions */
 	if (!vy_tx_is_ro(tx) && tx->is_aborted) {
 		tx->state = VINYL_TX_ROLLBACK;
@@ -5920,7 +5977,6 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 		e->xm->lsn = lsn;
 
 	struct txv *v, *tmp;
-	struct vy_quota *quota = &e->quota;
 	struct lsregion *allocator = &e->allocator;
 	size_t mem_used_before = lsregion_used(allocator);
 	/*
@@ -5946,10 +6002,23 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 	size_t write_size = mem_used_after - mem_used_before;
 	vy_stat_tx(e->stat, tx->start, count, write_count, write_size);
 
+	if (tx->write_size > write_size) {
+		/* Release superfluous quota reserved in vy_prepare(). */
+		vy_quota_release(&e->quota, tx->write_size - write_size);
+	}
+	if (tx->write_size < write_size) {
+		/*
+		 * We underestimated memory used by this transaction,
+		 * which should not normally happen. Warn the user and
+		 * fix up the quota.
+		 */
+		say_warn("underestimated quota reservation: %ld < %ld",
+			 (long)tx->write_size, (long)write_size);
+		vy_quota_force_use(&e->quota, write_size - tx->write_size);
+	}
+
 	TRASH(tx);
 	free(tx);
-
-	vy_quota_use(quota, write_size);
 	return 0;
 }
 
