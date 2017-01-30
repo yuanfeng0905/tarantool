@@ -110,7 +110,7 @@ SysviewSpace::dropIndex(Index *index)
 }
 
 SysviewEngine::SysviewEngine()
-	:Engine("sysview", &memtx_tuple_format_vtab)
+	:Engine("sysview", NULL)
 {
 }
 

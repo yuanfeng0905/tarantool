@@ -84,7 +84,7 @@ bool box_snapshot_is_in_progress = false;
  * it also means we've successfully connected to the master
  * and began receiving updates from it.
  */
-static bool box_init_done = false;
+static bool box_is_configured = false;
 static bool is_ro = true;
 
 /**
@@ -421,11 +421,11 @@ box_sync_replication_source(double timeout)
 void
 box_set_replication_source(void)
 {
-	if (!box_init_done) {
+	if (!box_is_configured) {
 		/*
 		 * Do nothing, we're in local hot standby mode, the server
 		 * will automatically begin following the replica when local
-		 * hot standby mode is finished, see box_init().
+		 * hot standby mode is finished, see box_cfg().
 		 */
 		return;
 	}
@@ -1032,7 +1032,7 @@ box_process_auth(struct request *request, struct obuf *out)
 	assert(request->type == IPROTO_AUTH);
 
 	/* Check that bootstrap has been finished */
-	if (!box_init_done)
+	if (!box_is_configured)
 		tnt_raise(ClientError, ER_LOADING);
 
 	const char *user = request->key;
@@ -1091,7 +1091,7 @@ box_process_join(struct ev_io *io, struct xrow_header *header)
 	xrow_decode_join(header, &server_uuid);
 
 	/* Check that bootstrap has been finished */
-	if (!box_init_done)
+	if (!box_is_configured)
 		tnt_raise(ClientError, ER_LOADING);
 
 	/* Forbid connection to itself */
@@ -1165,7 +1165,7 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	assert(header->type == IPROTO_SUBSCRIBE);
 
 	/* Check that bootstrap has been finished */
-	if (!box_init_done)
+	if (!box_is_configured)
 		tnt_raise(ClientError, ER_LOADING);
 
 	struct tt_uuid cluster_uuid = uuid_nil, replica_uuid = uuid_nil;
@@ -1265,7 +1265,7 @@ box_free(void)
 	 * See gh-584 "box_free() is called even if box is not
 	 * initialized
 	 */
-	if (box_init_done) {
+	if (box_is_configured) {
 #if 0
 		session_free();
 		cluster_free();
@@ -1415,11 +1415,17 @@ bootstrap(struct vclock *start_vclock)
 		panic("failed to save a snapshot");
 }
 
-static inline void
+int
 box_init(void)
 {
-	tuple_init();
+	if (tuple_init() != 0)
+		return -1;
+	return 0;
+}
 
+static inline void
+box_cfg_xc(void)
+{
 	rmean_box = rmean_new(iproto_type_strs, IPROTO_TYPE_STAT_MAX);
 	rmean_error = rmean_new(rmean_error_strings, RMEAN_ERROR_LAST);
 
@@ -1558,14 +1564,14 @@ box_init(void)
 	say_info("ready to accept requests");
 
 	fiber_gc();
-	box_init_done = true;
+	box_is_configured = true;
 }
 
 void
-box_load_cfg()
+box_cfg(void)
 {
 	try {
-		box_init();
+		box_cfg_xc();
 	} catch (Exception *e) {
 		e->log();
 		panic("can't initialize storage: %s", e->get_errmsg());
@@ -1586,7 +1592,7 @@ int
 box_snapshot()
 {
 	/* Signal arrived before box.cfg{} */
-	if (! box_init_done)
+	if (! box_is_configured)
 		return 0;
 	int rc = 0;
 	if (box_snapshot_is_in_progress) {

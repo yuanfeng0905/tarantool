@@ -41,7 +41,7 @@ extern "C" {
 #endif /* defined(__cplusplus) */
 
 /** Initialize tuple library */
-void
+int
 tuple_init(void);
 
 /** Cleanup tuple library */
@@ -365,6 +365,20 @@ tuple_format(const struct tuple *tuple)
 	assert(tuple_format_id(format) == tuple->format_id);
 	return format;
 }
+
+/**
+ * Instantiate a new engine-independent tuple from raw MsgPack Array data
+ * using runtime arena. Use this function to create a standalone tuple
+ * from Lua or C procedures.
+ *
+ * \param data tuple data in MsgPack Array format ([field1, field2, ...]).
+ * \param end the end of \a data
+ * \retval tuple on success
+ * \retval NULL on out of memory
+ * \sa \code box.tuple.new(data) \endcode
+ */
+struct tuple *
+tuple_new(const char *data, const char *end);
 
 /**
  * Free the tuple of any engine.

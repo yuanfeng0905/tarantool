@@ -114,9 +114,7 @@ lbox_tuple_new(lua_State *L)
 	}
 	mpstream_flush(&stream);
 
-	box_tuple_format_t *fmt = box_tuple_format_default();
-	struct tuple *tuple = box_tuple_new(fmt, buf->buf,
-					   buf->buf + ibuf_used(buf));
+	struct tuple *tuple = tuple_new(buf->buf, buf->buf + ibuf_used(buf));
 	if (tuple == NULL)
 		luaT_error(L);
 	/* box_tuple_new() doesn't leak on exception, see public API doc */

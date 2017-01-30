@@ -116,12 +116,14 @@ space_new(struct space_def *def, struct rlist *key_list)
 				      index_count * sizeof(Index *));
 	space->def = *def;
 	Engine *engine = engine_find(def->engine_name);
-	space->format = tuple_format_new(key_list, engine->format);
-	if (space->format == NULL)
-		diag_raise();
-	space->has_unique_secondary_key = has_unique_secondary_key;
-	tuple_format_ref(space->format, 1);
-	space->format->exact_field_count = def->exact_field_count;
+	if (engine->format != NULL) {
+		space->format = tuple_format_new(key_list, engine->format);
+		if (space->format == NULL)
+			diag_raise();
+		space->has_unique_secondary_key = has_unique_secondary_key;
+		tuple_format_ref(space->format, 1);
+		space->format->exact_field_count = def->exact_field_count;
+	}
 	space->index_id_max = index_id_max;
 	/* init space engine instance */
 	space->handler = engine->open();

@@ -32,7 +32,6 @@
 
 #include "trivia/util.h"
 #include "fiber.h"
-#include "tt_uuid.h"
 
 static struct mempool tuple_iterator_pool;
 
@@ -41,6 +40,56 @@ static struct mempool tuple_iterator_pool;
  * \sa tuple_bless()
  */
 struct tuple *box_tuple_last;
+
+/**
+ * A format for standalone tuples allocated on runtime arena.
+ * \sa tuple_new().
+ */
+static struct tuple_format *tuple_format_runtime;
+
+struct tuple *
+tuple_new(const char *data, const char *end)
+{
+	mp_tuple_assert(data, end);
+	size_t data_len = end - data;
+	size_t total = sizeof(struct tuple) + data_len;
+
+	struct tuple *tuple = (struct tuple *) malloc(total);
+	if (tuple == NULL) {
+		diag_set(OutOfMemory, (unsigned) total,
+			 "malloc", "tuple");
+		return NULL;
+	}
+
+	struct tuple_format *format = tuple_format_runtime;
+	tuple->refs = 0;
+	tuple->bsize = data_len;
+	tuple->format_id = tuple_format_id(format);
+	tuple_format_ref(format, 1);
+	tuple->data_offset = sizeof(struct tuple);
+	char *raw = (char *) tuple + tuple->data_offset;
+	memcpy(raw, data, data_len);
+	say_debug("%s(%zu) = %p", __func__, data_len, tuple);
+	return tuple;
+}
+
+static void
+runtime_tuple_delete(struct tuple_format *format, struct tuple *tuple)
+{
+	say_debug("%s(%p)", __func__, tuple);
+	assert(tuple->refs == 0);
+	size_t total = sizeof(struct tuple) + tuple->bsize;
+	tuple_format_ref(format, -1);
+#if !defined(NDEBUG)
+	memset(tuple, '#', total);
+#endif
+	(void) total;
+	free(tuple);
+}
+
+struct tuple_format_vtab runtime_tuple_format_vtab = {
+	runtime_tuple_delete,
+};
 
 int
 tuple_validate_raw(struct tuple_format *format, const char *tuple)
@@ -194,15 +243,31 @@ tuple_extract_key_raw(const char *data, const char *data_end,
 	return key;
 }
 
-void
+int
 tuple_init(void)
 {
-	tuple_format_init();
+	if (tuple_format_init() != 0)
+		return -1;
+
+	/*
+	 * Create a format for runtime tuples
+	 */
+	RLIST_HEAD(empty_list);
+	tuple_format_runtime = tuple_format_new(&empty_list,
+						&runtime_tuple_format_vtab);
+	if (tuple_format_runtime == NULL) {
+		tuple_format_free();
+		return -1;
+	}
+	/* Make sure this one stays around. */
+	tuple_format_ref(tuple_format_runtime, 1);
 
 	mempool_create(&tuple_iterator_pool, &cord()->slabc,
 		       sizeof(struct tuple_iterator));
 
 	box_tuple_last = NULL;
+
+	return 0;
 }
 
 void
@@ -216,13 +281,14 @@ tuple_free(void)
 
 	mempool_destroy(&tuple_iterator_pool);
 
+	tuple_format_ref(tuple_format_runtime, -1);
 	tuple_format_free();
 }
 
 box_tuple_format_t *
 box_tuple_format_default(void)
 {
-	return tuple_format_default;
+	return tuple_format_runtime;
 }
 
 int

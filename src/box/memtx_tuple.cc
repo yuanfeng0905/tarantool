@@ -223,8 +223,7 @@ box_tuple_update(const box_tuple_t *tuple, const char *expr,
 		return NULL;
 	}
 
-	struct tuple *ret = memtx_tuple_new(tuple_format_default, new_data,
-					    new_data + new_size);
+	struct tuple *ret = tuple_new(new_data, new_data + new_size);
 	region_truncate(region, used);
 	if (ret != NULL)
 		return tuple_bless_xc(ret);
@@ -248,8 +247,7 @@ box_tuple_upsert(const box_tuple_t *tuple, const char *expr,
 		return NULL;
 	}
 
-	struct tuple *ret = memtx_tuple_new(tuple_format_default, new_data,
-					    new_data + new_size);
+	struct tuple *ret = tuple_new(new_data, new_data + new_size);
 	region_truncate(region, used);
 	if (ret != NULL)
 		return tuple_bless_xc(ret);
@@ -259,7 +257,8 @@ box_tuple_upsert(const box_tuple_t *tuple, const char *expr,
 box_tuple_t *
 box_tuple_new(box_tuple_format_t *format, const char *data, const char *end)
 {
-	struct tuple *ret = memtx_tuple_new(format, data, end);
+	(void) format;
+	struct tuple *ret = tuple_new(data, end);
 	if (ret == NULL)
 		return NULL;
 	/* Can't throw on zero refs. */

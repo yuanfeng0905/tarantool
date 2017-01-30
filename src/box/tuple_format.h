@@ -102,12 +102,6 @@ struct tuple_format_vtab {
 };
 
 /**
- * Hack: tuple_format_default and sysview engine use this vtab,
- * but should use the runtime arena and runtime specific vtab.
- */
-extern struct tuple_format_vtab memtx_tuple_format_vtab;
-
-/**
  * @brief Tuple format
  * Tuple format describes how tuple is stored and information about its fields
  */
@@ -133,12 +127,6 @@ struct tuple_format {
 	/* Formats of the fields */
 	struct tuple_field_format fields[];
 };
-
-/**
- * Default format for a tuple which does not belong
- * to any space and is stored in memory.
- */
-extern struct tuple_format *tuple_format_default;
 
 extern struct tuple_format **tuple_formats;
 
