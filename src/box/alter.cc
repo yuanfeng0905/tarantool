@@ -718,6 +718,10 @@ struct alter_space {
 	struct space *old_space;
 	/** New space. */
 	struct space *new_space;
+	/** First space in chain, currently stored in space cache */
+	struct space *original_space;
+	/** Target index for replace trigger operations */
+	Index *new_index;
 };
 
 struct alter_space *
@@ -812,6 +816,9 @@ alter_space_commit(struct trigger *trigger, void * /* event */)
 						    alter->new_space);
 
 	struct space *old_space = space_cache_replace(alter->new_space);
+	/* On commit first shadow space should be updated first */
+	assert(rlist_first_entry(&alter->old_space->shadow,
+				 struct space, shadow) == alter->new_space);
 	alter->new_space = NULL; /* for alter_space_delete(). */
 	assert(old_space == alter->old_space);
 	space_delete(old_space);
@@ -838,6 +845,9 @@ alter_space_rollback(struct trigger *trigger, void * /* event */)
 	class AlterSpaceOp *op;
 	rlist_foreach_entry(op, &alter->ops, link)
 		op->rollback(alter);
+	/* On rollback last shadow space should be handled first */
+	assert(rlist_last_entry(&alter->old_space->shadow,
+				struct space, shadow) == alter->new_space);
 	alter_space_delete(alter);
 }
 
@@ -917,6 +927,8 @@ alter_space_do(struct txn *txn, struct alter_space *alter,
 	 * Sic: the triggers are not moved over yet.
 	 */
 	alter->new_space = space_new(&alter->space_def, &alter->key_list);
+	/* Add space to shadow list */
+	rlist_add(&alter->old_space->shadow, &alter->new_space->shadow);
 	/*
 	 * Copy the replace function, the new space is at the same recovery
 	 * phase as the old one. This hack is especially necessary for
@@ -1234,7 +1246,11 @@ on_replace_in_old_space(struct trigger *trigger, void *event)
 {
 	struct txn *txn = (struct txn *) event;
 	struct txn_stmt *stmt = txn_current_stmt(txn);
-	Index *new_index = (Index *) trigger->data;
+	struct alter_space *alter = (struct alter_space *)trigger->data;
+	Index *new_index = alter->new_index;
+	/* Check tuple against new index */
+	if (tuple_validate(alter->new_space->format, stmt->new_tuple))
+		diag_raise();
 	/*
 	 * First set a rollback trigger, then do replace, since
 	 * creating the trigger may fail.
@@ -1295,10 +1311,12 @@ AddIndex::alter(struct alter_space *alter)
 	 * Get the new index and build it.
 	 */
 	Index *new_index = index_find_xc(alter->new_space, new_key_def->iid);
-	engine->buildSecondaryKey(alter->old_space, alter->new_space, new_index);
+	/** Tuples are stored in the original space, not in the old_space */
+	engine->buildSecondaryKey(alter->original_space, alter->new_space, new_index);
+	alter->new_index = new_index;
 	on_replace = txn_alter_trigger_new(on_replace_in_old_space,
-					   new_index);
-	trigger_add(&alter->old_space->on_replace, on_replace);
+					   alter);
+	trigger_add(&alter->original_space->on_replace, on_replace);
 }
 
 AddIndex::~AddIndex()
@@ -1413,6 +1431,12 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 	uint32_t old_id = tuple_field_u32_xc(old_tuple ?
 					  old_tuple : new_tuple, ID);
 	struct space *old_space = space_by_id(old_id);
+	struct space *original_space = old_space;
+	if (old_space != NULL && !rlist_empty(&old_space->shadow)) {
+		/* Space is already mutating, alter last shadow copy */
+		old_space = rlist_last_entry(&old_space->shadow,
+					     struct space, shadow);
+	}
 	if (new_tuple != NULL && old_space == NULL) { /* INSERT */
 		struct space_def def;
 		space_def_create_from_tuple(&def, new_tuple, ER_CREATE_SPACE);
@@ -1458,6 +1482,7 @@ on_replace_dd_space(struct trigger * /* trigger */, void *event)
 		 * in WAL-error-safe mode.
 		 */
 		struct alter_space *alter = alter_space_new();
+		alter->original_space = original_space;
 		auto scoped_guard =
 			make_scoped_guard([=] {alter_space_delete(alter);});
 		ModifySpace *modify =
@@ -1521,9 +1546,16 @@ on_replace_dd_index(struct trigger * /* trigger */, void *event)
 	uint32_t iid = tuple_field_u32_xc(old_tuple ? old_tuple : new_tuple,
 				       INDEX_ID);
 	struct space *old_space = space_cache_find(id);
+	struct space *original_space = old_space;
+	if (old_space != NULL && !rlist_empty(&old_space->shadow)) {
+		/* Space is already mutating, alter last shadow copy */
+		old_space = rlist_last_entry(&old_space->shadow,
+					     struct space, shadow);
+	}
 	access_check_ddl(old_space->def.uid, SC_SPACE);
 	Index *old_index = space_index(old_space, iid);
 	struct alter_space *alter = alter_space_new();
+	alter->original_space = original_space;
 	auto scoped_guard =
 		make_scoped_guard([=] { alter_space_delete(alter); });
 	/*

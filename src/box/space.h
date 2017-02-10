@@ -85,6 +85,10 @@ struct space {
 	 */
 	struct Index **index_map;
 	/**
+	 * Space shadow copies, used for parallel space altering
+	 */
+	struct rlist shadow;
+	/**
 	 * Dense array of indexes defined on the space, in order
 	 * of index id. Initially stores only the primary key at
 	 * position 0, and is fully built by

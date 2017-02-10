@@ -105,6 +105,7 @@ space_new(struct space_def *def, struct rlist *key_list)
 	if (space == NULL)
 		tnt_raise(OutOfMemory, sz, "malloc", "struct space");
 
+	rlist_create(&space->shadow);
 	rlist_create(&space->on_replace);
 	auto scoped_guard = make_scoped_guard([=]
 	{
@@ -148,6 +149,7 @@ space_delete(struct space *space)
 		delete space->handler;
 
 	trigger_destroy(&space->on_replace);
+	rlist_del(&space->shadow);
 	free(space);
 }
 

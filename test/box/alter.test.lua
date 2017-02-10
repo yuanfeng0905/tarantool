@@ -231,4 +231,68 @@ indexes = box.space._index:select{space.id}
 lsn < box.space._index:select{box.space.test.id, 0}[1][5].lsn
 space:drop()
 
+-- ------------------------------------------------------------------
+-- gh-2074 Check tuple format for inserting indexes
+-- ------------------------------------------------------------------
+
+fiber = require'fiber'
+
+_ = box.schema.space.create('test'):create_index('pk')
+
+test_run:cmd("setopt delimiter ';'")
+
+function add_index_secondary()
+  box.space.test:create_index('secondary', {parts = {2, 'num'}})
+end;
+
+function insert_tuple(tuple)
+  box.space.test:replace(tuple)
+end;
+
+_ = fiber.create(insert_tuple, {1, 2, '4'})
+_ = fiber.create(add_index_secondary)
+_ = fiber.create(insert_tuple, {2, '3', 'r'});
+
+test_run:cmd("setopt delimiter ''");
+
+box.space.test:select()
+box.space.test.index.secondary ~= nil
+
+box.space.test:drop()
+
+-- ------------------------------------------------------------------
+-- gh-2075 Parallel ddl for same space
+-- ------------------------------------------------------------------
+
+_ = box.schema.space.create('test'):create_index('pk')
+
+test_run:cmd("setopt delimiter ';'");
+
+function add_index_secondary()
+  box.space.test:create_index('secondary', {parts = {2, 'num'}})
+end;
+
+function add_index_third()
+  box.space.test:create_index('third', {parts = {3, 'string'}})
+end;
+
+function insert_tuple(tuple)
+  box.space.test:replace(tuple)
+end;
+
+_ = fiber.create(insert_tuple, {1, 2, '8'})
+_ = fiber.create(add_index_secondary)
+_ = fiber.create(insert_tuple, {2, 3, 'r'})
+_ = fiber.create(add_index_third)
+_ = fiber.create(insert_tuple, {3, 5, '5'});
+
+test_run:cmd("setopt delimiter ''");
+
+box.space.test:select()
+fiber.sleep(0.01)
+box.space.test.index.secondary:select()
+box.space.test.index.third:select()
+
+box.space.test:drop()
+
 test_run:cmd("clear filter")
