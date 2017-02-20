@@ -11,6 +11,7 @@ include_directories(${LUAJIT_INCLUDE_DIRS})
 include_directories(${READLINE_INCLUDE_DIRS})
 include_directories(${LIBYAML_INCLUDE_DIRS})
 include_directories(${MSGPUCK_INCLUDE_DIRS})
+include_directories(${CURL_INCLUDE_DIRS})
 
 set(LIBUTIL_FREEBSD_SRC ${CMAKE_SOURCE_DIR}/third_party/libutil_freebsd)
 include_directories(${LIBUTIL_FREEBSD_SRC})
@@ -40,6 +41,7 @@ lua_source(lua_sources lua/argparse.lua)
 lua_source(lua_sources lua/env.lua)
 lua_source(lua_sources lua/trigger.lua)
 lua_source(lua_sources ../third_party/luafun/fun.lua)
+lua_source(lua_sources lua/curl.lua)
 # LuaJIT jit.* library
 lua_source(lua_sources "${CMAKE_BINARY_DIR}/third_party/luajit/src/jit/bc.lua")
 lua_source(lua_sources "${CMAKE_BINARY_DIR}/third_party/luajit/src/jit/bcsave.lua")
@@ -135,6 +137,9 @@ set (server_sources
      lua/pickle.c
      lua/fio.c
      lua/crypto.c
+     lua/curl_driver.c
+     lua/curl_request_pool.c
+     lua/curl_wrapper.c
      ${lua_sources}
      ${PROJECT_SOURCE_DIR}/third_party/lua-yaml/lyaml.cc
      ${PROJECT_SOURCE_DIR}/third_party/lua-yaml/b64.c
@@ -187,6 +192,7 @@ set (common_libraries
     ${LIBYAML_LIBRARIES}
     ${READLINE_LIBRARIES}
     ${OPENSSL_LIBRARIES}
+    ${CURL_LIBRARIES}
 )
 
 if (TARGET_OS_LINUX OR TARGET_OS_DEBIAN_FREEBSD)
