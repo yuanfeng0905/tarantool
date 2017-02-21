@@ -443,13 +443,16 @@ cleanup(lua_State *L)
 static const struct luaL_Reg R[] = {
     {"version", version},
     {"new",     new},
+    {NULL,      NULL}
+};
+
+static const struct luaL_Reg M[] = {
     {"async_request", async_request},
     {"stat",          get_stat},
     {"pool_stat",     pool_stat},
     {"free",          cleanup /* free already exists */},
     {NULL,            NULL}
 };
-
 
 /*
  * Lib initializer
@@ -458,12 +461,7 @@ LUA_API
 int
 luaopen_curl_driver(lua_State *L)
 {
-    /*
-        Add metatable.__index = metatable
-    */
-    luaL_newmetatable(L, DRIVER_LUA_UDATA_NAME);
-    lua_pushvalue(L, -1);
-    lua_setfield(L, -2, "__index");
-    luaL_register(L, "curldriver", R);
-    return 1;
+	luaL_register_type(L, DRIVER_LUA_UDATA_NAME, M);
+	luaL_register(L, "curl.driver", R);
+	return 1;
 }

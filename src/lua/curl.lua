@@ -30,7 +30,7 @@
 --
 
 local fiber       = require('fiber')
-local driver = require('curldriver')
+local driver = require('curl.driver')
 
 local curl_mt
 
@@ -56,17 +56,7 @@ local http = function(opts)
     opts.pool_size = opts.pool_size or 1000
 
     local curl = driver.new(opts.pipeline, opts.max_conns, opts.pool_size)
-    print(driver.version())
-    print(yaml.encode(getmetatable(curl)))
-    print(driver.stat())
-    curl:stat()
-    local ok, version = curl:version()
-    if not ok then
-        error("can't get curl:version()")
-    end
-
-    return setmetatable({VERSION     = version,
-                         curl        = curl, },
+    return setmetatable({curl        = curl, },
                          curl_mt )
 end
 
