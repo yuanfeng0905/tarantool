@@ -291,6 +291,7 @@ addsock(curl_socket_t s, CURL *easy, int action, curl_ctx_t *l)
 
     memset(fdp, 0, sizeof(sock_t));
 
+
     fdp->curl_ctx = l;
 
     setsock(fdp, s, easy, action, l);
@@ -325,7 +326,7 @@ sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
         if (fdp == NULL) {
             if (!addsock(s, e, what, l))
                 return 1;
-        }
+            }
         else {
             dd("Changing action from = %s, to = %s",
                     whatstr[fdp->action], whatstr[what]);
@@ -482,7 +483,7 @@ request_t*
 new_request_test(curl_ctx_t *l, const char *url)
 {
     request_t *r = new_request(l);
-    if (c == NULL)
+    if (url == NULL)
         return NULL;
 
     curl_easy_setopt(r->easy, CURLOPT_URL, url);

@@ -34,7 +34,7 @@
 
 #include "curl_wrapper.h"
 #include "curl_utils.h"
-
+#include "say.h"
 /**
  * Unique name for userdata metatables
  */
@@ -80,5 +80,13 @@ add_field_u64(lua_State *L, const char *key, uint64_t value)
     lua_pushinteger(L, value);
     lua_settable(L, -3);  /* 3rd element from the stack top */
 }
+
+/**
+ * @brief Lua/C API exports
+ * @param L Lua stack
+ * @return 1
+ */
+LUALIB_API int
+luaopen_curl_driver(lua_State *L);
 
 #endif /* DRIVER_H_INCLUDED */

@@ -54,6 +54,7 @@
 #include "lua/pickle.h"
 #include "lua/fio.h"
 #include <small/ibuf.h>
+#include "lua/curl_driver.h"
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -375,13 +376,13 @@ tarantool_lua_init(const char *tarantool_bin, int argc, char **argv)
 	tarantool_lua_fio_init(L);
 	tarantool_lua_socket_init(L);
 	tarantool_lua_pickle_init(L);
+        luaopen_curl_driver(L);
 	luaopen_msgpack(L);
 	lua_pop(L, 1);
 	luaopen_yaml(L);
 	lua_pop(L, 1);
 	luaopen_json(L);
 	lua_pop(L, 1);
-
 #if defined(HAVE_GNU_READLINE)
 	/*
 	 * Disable libreadline signals handlers. All signals are handled in

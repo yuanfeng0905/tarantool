@@ -30,7 +30,7 @@
 --
 
 local fiber       = require('fiber')
-local curl_driver = require('curl.driver')
+local driver = require('curldriver')
 
 local curl_mt
 
@@ -45,6 +45,8 @@ local curl_mt
 --  Returns:
 --     curl object or raise error()
 --
+yaml = require('yaml')
+
 local http = function(opts)
 
     opts = opts or {}
@@ -53,8 +55,11 @@ local http = function(opts)
     opts.max_conns = opts.max_conns or 5
     opts.pool_size = opts.pool_size or 1000
 
-    local curl = curl_driver.new(opts.pipeline, opts.max_conns, opts.pool_size)
-
+    local curl = driver.new(opts.pipeline, opts.max_conns, opts.pool_size)
+    print(driver.version())
+    print(yaml.encode(getmetatable(curl)))
+    print(driver.stat())
+    curl:stat()
     local ok, version = curl:version()
     if not ok then
         error("can't get curl:version()")
@@ -74,11 +79,31 @@ local function read_cb(cnt, ctx)
 end
 
 local function write_cb(data, ctx)
+    log.info("Write_cb")
+    log.info(ctx)
     ctx.response = ctx.response .. data
     return data:len()
 end
 
+
+log = require('log')
+json = require('json')
+
+local function foo(ctx)
+    log.info(ctx)
+    ctx.done = true 
+    log.info(ctx)
+end
+
 local function done_cb(curl_code, http_code, error_message, ctx)
+    log.info("Done_cb")
+    log.info(ctx)
+    ctx = {}
+    status, err = pcall(foo, ctx)
+    if err then
+        log.info(err)
+        os.exit(1)
+    end
     ctx.done          = true
     ctx.http_code     = http_code
     ctx.curl_code     = curl_code
@@ -162,7 +187,8 @@ local function sync_request(self, method, url, body, opts)
     local ticks = 0
 
     while not ctx.done do
-
+        log.info("In cycle")
+        log.info(ctx)
         if ticks > max_ticks then
           error("curl has an internal error, msg = read_timeout reached")
         end

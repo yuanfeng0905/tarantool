@@ -37,7 +37,7 @@
 #include <inttypes.h>
 #include <stdbool.h>
 
-#include <tarantool_ev.h>
+//#include <tarantool_ev.h>
 #include <curl/curl.h>
 
 #include "src/fiber.h"

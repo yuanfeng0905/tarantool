@@ -30,7 +30,7 @@
  */
 
 #include "curl_driver.h"
-
+#include "lua/utils.h"
 /*
    <async_request> This function does async HTTP request
 
@@ -87,11 +87,10 @@ int
 async_request(lua_State *L)
 {
     const char *reason = "unknown error";
-
     lib_ctx_t *ctx = ctx_get(L);
     if (ctx == NULL)
         return luaL_error(L, "can't get lib ctx");
-
+    ctx->done = NULL;
     if (ctx->done)
         return luaL_error(L, "curl stopped");
 
@@ -353,7 +352,7 @@ version(lua_State *L)
   char version[sizeof("tarantool.curl: xxx.xxx.xxx") +
                sizeof("curl: xxx.xxx.xxx,") +
                sizeof("libev: xxx.xxx") ];
-
+    say(S_INFO, "%s", "hello");
   snprintf(version, sizeof(version) - 1,
             "tarantool.curl: %i.%i.%i, curl: %i.%i.%i, libev: %i.%i",
             TNT_CURL_VERSION_MAJOR,
@@ -444,10 +443,6 @@ cleanup(lua_State *L)
 static const struct luaL_Reg R[] = {
     {"version", version},
     {"new",     new},
-    {NULL,      NULL}
-};
-
-static const struct luaL_Reg M[] = {
     {"async_request", async_request},
     {"stat",          get_stat},
     {"pool_stat",     pool_stat},
@@ -469,8 +464,6 @@ luaopen_curl_driver(lua_State *L)
     luaL_newmetatable(L, DRIVER_LUA_UDATA_NAME);
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
-    luaL_register(L, NULL, M);
-    luaL_register(L, NULL, R);
-
+    luaL_register(L, "curldriver", R);
     return 1;
 }
