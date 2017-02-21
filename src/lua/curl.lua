@@ -45,7 +45,6 @@ local curl_mt
 --  Returns:
 --     curl object or raise error()
 --
-yaml = require('yaml')
 
 local http = function(opts)
 
@@ -69,31 +68,14 @@ local function read_cb(cnt, ctx)
 end
 
 local function write_cb(data, ctx)
-    log.info("Write_cb")
-    log.info(ctx)
     ctx.response = ctx.response .. data
     return data:len()
 end
 
 
-log = require('log')
-json = require('json')
 
-local function foo(ctx)
-    log.info(ctx)
-    ctx.done = true 
-    log.info(ctx)
-end
 
 local function done_cb(curl_code, http_code, error_message, ctx)
-    log.info("Done_cb")
-    log.info(ctx)
-    ctx = {}
-    status, err = pcall(foo, ctx)
-    if err then
-        log.info(err)
-        os.exit(1)
-    end
     ctx.done          = true
     ctx.http_code     = http_code
     ctx.curl_code     = curl_code
@@ -177,8 +159,6 @@ local function sync_request(self, method, url, body, opts)
     local ticks = 0
 
     while not ctx.done do
-        log.info("In cycle")
-        log.info(ctx)
         if ticks > max_ticks then
           error("curl has an internal error, msg = read_timeout reached")
         end
