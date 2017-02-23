@@ -169,7 +169,7 @@ request_add_header(request_t *c, const char *http_header)
 
 static inline
 bool
-request_add_header_keepaive(request_t *c, const request_start_args_t *a)
+request_add_header_keepalive(request_t *c, const request_start_args_t *a)
 {
   static char buf[255];
 

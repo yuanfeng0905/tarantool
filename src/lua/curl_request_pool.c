@@ -70,6 +70,14 @@ reset_request(request_t *r)
         r->headers = NULL;
     }
 
+    if (r->headers_buf){
+        free(r->headers_buf->data);
+        free(r->headers_buf);
+    }
+    r->headers_buf = (data_buf*) malloc(sizeof(data_buf));
+    r->headers_buf->data = NULL;
+    r->headers_buf->size = 0;
+
     if (r->easy) {
         curl_easy_cleanup(r->easy);
         r->easy = NULL;
@@ -193,4 +201,24 @@ request_pool_get_free_size(request_pool_t *p)
     }
 
     return size;
+}
+
+size_t push_to_buf(data_buf* buf, char* data, size_t n_bytes){
+    if (buf->data){
+        char* new_ptr = (char*) malloc((buf->size + n_bytes) * sizeof(char));
+        if (!new_ptr)
+            return -1;
+        memcpy(new_ptr, buf->data, buf->size);
+        memcpy(new_ptr + buf->size, data, n_bytes);
+        free(buf->data);
+        buf->data = new_ptr;
+        buf->size += n_bytes;
+    } else {
+        buf->data = (char*) malloc(n_bytes * sizeof(char));
+        if (!buf->data)
+            return -1;
+        buf->size = n_bytes;
+        memcpy(buf->data, data, n_bytes);
+    }
+    return n_bytes;
 }

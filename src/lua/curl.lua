@@ -175,7 +175,7 @@ local function sync_request(self, method, url, body, opts)
     end
 
     -- Curl did a request and he has a response
-    return { code = ctx.http_code, body = ctx.response }
+    return { code = ctx.http_code, body = ctx.response, headers=ctx.response_headers}
 end
 -- }}}
 

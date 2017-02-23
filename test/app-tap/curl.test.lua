@@ -3,26 +3,39 @@
 local tap = require('tap')
 local curl  = require('curl')
 local json  = require('json')
+local test = tap.test("curl")
+local log = require('log')
+-- Supress console log messages
+log.level(4)
 
-tap:test("basic http pos/get", function(test)
-    test:plan(9)
+-- create ev_loop
+box.cfg{logger='tarantool.log'}
+
+
+test:plan(3)
+test:test("basic http post/get", function(test)
+    test:plan(11)
 
     local http = curl.http({pool_size=1})
 
     test:ok(http ~= nil, "client is created")
-
+    local url = "http://httpbin.org/"
     local headers   = { my_header = "1", my_header2 = "2" }
     local my_body   = { key="value" }
     local json_body = json.encode(my_body)
 
-    local r = http:get('https://tarantool.org/this/page/not/exists',
+    local r = http:get(url .. "get" ,{headers=headers})
+    test:is(r.code, 200, "http code page exists")
+    test:isnt(r.body:len(), 0,"not empty body page exists")
+
+    r = http:get(url .. 'this/page/not/exists',
                        {headers=headers} )
-    test:is(r.code,404, "http_code page not exists")
+    test:is(r.code, 404, "http_code page not exists")
     test:isnt(r.body:len(), 0, " not empty body page not exists")
 
     r = http:get('https://tarantool.org/', {headers=headers})
-    test:is(r.code, 200, "http code page exists")
-    test:isnt(r.body:len(), 0,"not empty body page exists")
+    test:is(r.code, 200, "https check: http code page exists")
+    test:isnt(r.body:len(), 0,"https check: not empty body page exists")
 
     local r = http:post('http://httpbin.org/post', json_body,
                         {headers=headers,
@@ -53,28 +66,61 @@ tap:test("basic http pos/get", function(test)
             pst.pool_size == 1 and
             pst.free == pst.pool_size, "stats checking")
     -- issue https://github.com/tarantool/curl/issues/3        
-    data = {a = 'b'}
-    headers = {}
+    local data = {a = 'b'}
+    local headers = {}
     headers['Content-Type'] = 'application/json'
     r = http:post('https://httpbin.org/post', json.encode(data),
                         {headers=headers})
-    test:is(r.code == 200 and json.decode(res.body)['json']['a'] == data['a'], "tarantool/curl/issues/3")
+    test:ok(r.code == 200 and json.decode(r.body)['json']['a'] == data['a'], "tarantool/curl/issues/3")
 
     http:free()
 end)
 
-tap:test("special methods", function(test)
-    test.plan()
+test:test("special methods", function(test)
+    test:plan(4)
+    local http = curl.http({pool_size=1})
+    local url = "https://httpbin.org/"
 
+    local delete_data = http:delete(url .. "delete")
+    test:is(delete_data.code, 200, "HTTP:DELETE request")
 
+    local options_data = http:http_options(url)
+    test:is(options_data.code, 200, "HTTP:OPTIONS request")
+    
+
+    local head_data = http:head(url)
+    local some_header = "Server: nginx"
+    test:is(head_data.code, 200, "HTTP:HEAD request code")
+    test:ok(string.find(head_data.headers, some_header), "HTTP:HEAD request content")
+    http:free()
 end)
 
-tap:test("ev_loop test", function(test)
+
+
+test:test("tests with server", function(test)
+    test:plan(6)
     local fiber = require('fiber')
-    local json  = require('json')
+    
+
+    os.execute("tests/server.js &")
+
+    local http = curl.http()
+    local host    = '127.0.0.1:10000'
+    
+    fiber.sleep(1)
+
+    local trace_data = http:trace(host)
+    test:is(trace_data.code, 200, "HTTP:TRACE request")
+    
+    
+    local connect_data = http:http_connect(host)
+    test:is(connect_data.code, 200, "HTTP:CONNECT request")
+ 
+    http:free()
+    
+    
 
     local num     = 10
-    local host    = '127.0.0.1:10000'
     local curls   = { }
     local headers = { }
 
@@ -122,10 +168,12 @@ tap:test("ev_loop test", function(test)
           end )
       end
     end
-
+    local ok_sockets_added = true
+    local ok_active = true
+    local ok_poolsize = true
+    local ok_timeout = true
     -- Join test
-    fiber.create(function()
-
+    fiber.create( function()
       local os   = require('os')
       local yaml = require('yaml')
       local rest = num
@@ -142,11 +190,20 @@ tap:test("ev_loop test", function(test)
 
           if obj.http ~= nil and obj.http:stat().active_requests == 0 then
             local st = obj.http:stat()
-            assert(st.sockets_added == st.sockets_deleted)
-            assert(st.active_requests == 0)
+            if st.sockets_added ~= st.sockets_deleted then
+                ok_sockets_added = false
+                rest = 0
+            end
+            if st.active_requests ~= 0 then
+                ok_active = false
+                rest = 0
+            end
 
             local pst = obj.http:pool_stat()
-            assert(pst.pool_size == pst.free)
+            if pst.pool_size ~= pst.free then
+                ok_poolsize = false
+                rest = 0
+            end
 
             obj.http:free()
             rest = rest - 1
@@ -163,11 +220,20 @@ tap:test("ev_loop test", function(test)
 
         -- Test failed
         if ticks > 80 then
-            test:ok(false, "timeout expired") 
+            ok_timeout = false
+            rest = 0
         end
 
       end
-
       os.exit(0)
-    end )
+    end)
+    fiber.sleep(1)
+    test:ok(ok_sockets_added, "Concurrent.Test free sockets")
+    test:ok(ok_poolsize, "Concurrent.Test poolsize and free fibers")
+    test:ok(ok_active, "Concurrent.Test no active requests")
+    test:ok(ok_timeout, "Concurrent.Test timeout not expired")
+
+    -- TODO: NOT best way to kill and Platform dependent 
+    os.execute("pkill -INT nodejs")
 end)
+

@@ -165,6 +165,14 @@ check_multi_info(curl_ctx_t *l)
         else
             ++l->stat.http_other_responses;
 
+        if (r->headers_buf->data && r->lua_ctx.fn_ctx != LUA_REFNIL){
+            /*we need to fill the field response_headers*/
+            lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx); // table on the top of stack
+            lua_pushstring(r->lua_ctx.L, "response_headers");
+            lua_pushstring(r->lua_ctx.L, r->headers_buf->data);
+            lua_settable(r->lua_ctx.L, -3);
+        }
+
         if (r->lua_ctx.done_fn != LUA_REFNIL) {
             /*
               Signature:
@@ -390,6 +398,20 @@ write_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
     return written;
 }
 
+static
+size_t
+header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
+{
+    dd("size = %zu, mitems = %zu", size, nitems);
+    request_t *r = (request_t*) ctx;
+    const size_t bytes = size * nitems;
+
+    int err = push_to_buf(r->headers_buf, buffer, bytes);
+    if (err < 0){
+        // TODO: handle somehow error with allocation in callback or what?
+    }
+    return bytes;
+}
 
 CURLMcode
 request_start(request_t *r, const request_start_args_t *a)
@@ -413,7 +435,7 @@ request_start(request_t *r, const request_start_args_t *a)
         curl_easy_setopt(r->easy, CURLOPT_TCP_KEEPINTVL,
                                   a->keepalive_interval);
         if (!request_add_header(r, "requestection: Keep-Alive") &&
-            !request_add_header_keepaive(r, a))
+            !request_add_header_keepalive(r, a))
         {
             ++r->curl_ctx->stat.failed_requests;
             return CURLM_OUT_OF_MEMORY;
@@ -451,6 +473,9 @@ request_start(request_t *r, const request_start_args_t *a)
 
     curl_easy_setopt(r->easy, CURLOPT_WRITEFUNCTION, write_cb);
     curl_easy_setopt(r->easy, CURLOPT_WRITEDATA, (void *) r);
+
+    curl_easy_setopt(r->easy, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(r->easy, CURLOPT_HEADERDATA, (void*) r);
 
     curl_easy_setopt(r->easy, CURLOPT_NOPROGRESS, 1L);
 
