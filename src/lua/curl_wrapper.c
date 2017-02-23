@@ -390,6 +390,18 @@ write_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
     return written;
 }
 
+static
+size_t
+header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
+{
+    dd("size = %zu, mitems = %zu", size, nitems);
+
+    request_t *r = (request_t*) ctx;
+    const size_t bytes = size * nitems;
+    // allocate memory for headers
+    memncpy(ctx->headers, buffer, bytes);
+    return bytes;
+}
 
 CURLMcode
 request_start(request_t *r, const request_start_args_t *a)
