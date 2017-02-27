@@ -390,13 +390,15 @@ new(lua_State *L)
 
     curl_args_t args = { .pipeline = false,
                          .max_conns = 5,
-                         .pool_size = 10000 };
+                         .pool_size = 10000,
+                         .buffer_size = 2048
+                        };
 
     /* pipeline: 1 - on, 0 - off */
     args.pipeline  = (bool) luaL_checkint(L, 1);
     args.max_conns = luaL_checklong(L, 2);
     args.pool_size = (size_t) luaL_checklong(L, 3);
-
+    args.buffer_size = (size_t) luaL_checklong(L, 4);
     ctx->curl_ctx = curl_ctx_new(&args);
     if (ctx->curl_ctx == NULL)
         return luaL_error(L, "curl_new failed");

@@ -118,6 +118,9 @@ typedef struct {
   long max_conns;
 
   size_t pool_size;
+
+  /* Size of buffers on reading */
+  size_t buffer_size;
 } curl_args_t;
 
 

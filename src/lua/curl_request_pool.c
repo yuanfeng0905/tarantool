@@ -38,10 +38,9 @@
 
 static inline void reset_request(request_t *r);
 
-
 static inline
 bool
-create_request(struct curl_ctx_s *ctx, size_t idx, request_t *r)
+create_request(struct curl_ctx_s *ctx, size_t idx, size_t size_buf, request_t *r)
 {
     assert(ctx);
     assert(r);
@@ -52,6 +51,10 @@ create_request(struct curl_ctx_s *ctx, size_t idx, request_t *r)
     r->curl_ctx = ctx;
 
     reset_request(r);
+
+    if (!init_buffer(r, size_buf)) {
+        return false;
+    }
 
     return true;
 }
@@ -71,12 +74,16 @@ reset_request(request_t *r)
     }
 
     if (r->headers_buf){
-        free(r->headers_buf->data);
+
+        if (r->headers_buf->data) {
+            free(r->headers_buf->data);
+        }
+        r->headers_buf->data = NULL;
+        r->headers_buf->len = 0;
+        r->headers_buf->size = 0;
         free(r->headers_buf);
+        r->headers_buf = NULL;
     }
-    r->headers_buf = (data_buf*) malloc(sizeof(data_buf));
-    r->headers_buf->data = NULL;
-    r->headers_buf->size = 0;
 
     if (r->easy) {
         curl_easy_cleanup(r->easy);
@@ -103,7 +110,7 @@ reset_request(request_t *r)
 
 
 bool
-request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s)
+request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s, size_t size_buffer)
 {
     assert(p);
     assert(c);
@@ -116,9 +123,9 @@ request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s)
     if (p->mem == NULL)
         goto error_exit;
     memset(p->mem, 0, p->size * sizeof(request_t));
-
+    p->size_buffer = size_buffer;
     for (size_t i = 0; i < p->size; ++i) {
-        if (!create_request(c, i, &p->mem[i]))
+        if (!create_request(c, i, size_buffer, &p->mem[i]))
             goto error_exit;
     }
 
@@ -160,6 +167,11 @@ request_pool_get_request(request_pool_t *p)
             r->easy = curl_easy_init();
             if (r->easy == NULL)
                 return NULL;
+            if (!r->headers_buf){
+                if (!init_buffer(r, p->size_buffer)) {
+                    return NULL;
+                }
+            }
 
             ++r->curl_ctx->stat.active_requests;
             r->pool.busy = true;
@@ -203,22 +215,33 @@ request_pool_get_free_size(request_pool_t *p)
     return size;
 }
 
-size_t push_to_buf(data_buf* buf, char* data, size_t n_bytes){
-    if (buf->data){
-        char* new_ptr = (char*) malloc((buf->size + n_bytes) * sizeof(char));
-        if (!new_ptr)
-            return -1;
-        memcpy(new_ptr, buf->data, buf->size);
-        memcpy(new_ptr + buf->size, data, n_bytes);
-        free(buf->data);
-        buf->data = new_ptr;
-        buf->size += n_bytes;
-    } else {
-        buf->data = (char*) malloc(n_bytes * sizeof(char));
-        if (!buf->data)
-            return -1;
-        buf->size = n_bytes;
-        memcpy(buf->data, data, n_bytes);
+bool
+init_buffer(request_t *r, size_t size_buf){
+    r->headers_buf = (data_buf_t*) malloc(sizeof(data_buf_t));
+
+    if (!r->headers_buf){
+        say(S_ERROR, "%s\n", "Can't allocate memory for buffer");
+        return false;
     }
-    return n_bytes;
+    r->headers_buf->data = (char*) malloc(size_buf * sizeof(char));
+    if (!r->headers_buf->data){
+        say(S_ERROR ,"%s \n","Can't allocate memory for buffer");
+        return false;
+    }
+    r->headers_buf->len = 0;
+    r->headers_buf->size = size_buf;
+    return true;
+}
+
+bool
+push_to_buf(data_buf_t* buf, char* data, size_t n_bytes){
+    assert(buf);
+    assert(buf->data);
+    if (buf->len + n_bytes > buf->size) {
+        say(S_ERROR, "%s\n","not enough buffer length");
+        return false;
+    }
+    memcpy(buf->data + buf->len, data, n_bytes);
+    buf->len += n_bytes;
+    return true;
 }

@@ -102,7 +102,7 @@ test:test("tests with server", function(test)
     local fiber = require('fiber')
     
 
-    os.execute("tests/server.js &")
+    os.execute("./server.js & echo $! > ./nd.pid")
 
     local http = curl.http()
     local host    = '127.0.0.1:10000'
@@ -233,7 +233,6 @@ test:test("tests with server", function(test)
     test:ok(ok_active, "Concurrent.Test no active requests")
     test:ok(ok_timeout, "Concurrent.Test timeout not expired")
 
-    -- TODO: NOT best way to kill and Platform dependent 
-    os.execute("pkill -INT nodejs")
+    os.execute("cat ./nd.pid | xargs kill -s TERM")
 end)
 

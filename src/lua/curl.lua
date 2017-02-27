@@ -53,8 +53,9 @@ local http = function(opts)
     opts.pipeline = opts.pipeline or 0
     opts.max_conns = opts.max_conns or 5
     opts.pool_size = opts.pool_size or 1000
+    opts.buffer_size = opts.buffer_size or 2048
 
-    local curl = driver.new(opts.pipeline, opts.max_conns, opts.pool_size)
+    local curl = driver.new(opts.pipeline, opts.max_conns, opts.pool_size, opts.buffer_size)
     return setmetatable({curl        = curl, },
                          curl_mt )
 end
@@ -71,8 +72,6 @@ local function write_cb(data, ctx)
     ctx.response = ctx.response .. data
     return data:len()
 end
-
-
 
 
 local function done_cb(curl_code, http_code, error_message, ctx)

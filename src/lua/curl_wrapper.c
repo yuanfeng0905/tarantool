@@ -166,8 +166,9 @@ check_multi_info(curl_ctx_t *l)
             ++l->stat.http_other_responses;
 
         if (r->headers_buf->data && r->lua_ctx.fn_ctx != LUA_REFNIL){
-            /*we need to fill the field response_headers*/
-            lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx); // table on the top of stack
+            /* we need to fill the field response_headers */
+            /* table on the top of stack */
+            lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx);
             lua_pushstring(r->lua_ctx.L, "response_headers");
             lua_pushstring(r->lua_ctx.L, r->headers_buf->data);
             lua_settable(r->lua_ctx.L, -3);
@@ -406,11 +407,11 @@ header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
     request_t *r = (request_t*) ctx;
     const size_t bytes = size * nitems;
 
-    int err = push_to_buf(r->headers_buf, buffer, bytes);
-    if (err < 0){
-        // TODO: handle somehow error with allocation in callback or what?
+    bool err = push_to_buf(r->headers_buf, buffer, bytes);
+    if (!err){
+        return 0;
     }
-   return bytes;
+    return bytes;
 }
 
 CURLMcode
@@ -543,7 +544,7 @@ curl_ctx_new(const curl_args_t *a)
 
     memset(l, 0, sizeof(curl_ctx_t));
 
-    if (!request_pool_new(&l->cpool, l, a->pool_size))
+    if (!request_pool_new(&l->cpool, l, a->pool_size, a->buffer_size))
         goto error_exit;
 
     l->loop = loop();

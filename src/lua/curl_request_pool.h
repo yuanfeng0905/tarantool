@@ -46,8 +46,9 @@ struct curl_ctx_s;
 
 typedef struct {
     char* data;
+    size_t  len;
     size_t size;
-} data_buf;
+} data_buf_t;
 
 typedef struct {
 
@@ -76,20 +77,24 @@ typedef struct {
   struct curl_slist *headers;
 
   /* Buffer for headers read */
-  data_buf* headers_buf;
+  data_buf_t* headers_buf;
 } request_t;
 
 typedef struct {
   request_t  *mem;
   size_t     size;
+
+  /* Max Size of buffer */
+  size_t size_buffer;
 } request_pool_t;
 
-bool request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s);
+bool request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s, size_t buffer_size);
 void request_pool_free(request_pool_t *p);
 
 request_t* request_pool_get_request(request_pool_t *p);
 void request_pool_free_request(request_pool_t *p, request_t *c);
 size_t request_pool_get_free_size(request_pool_t *p);
 
-size_t push_to_buf(data_buf* buf, char* data, size_t n_bytes);
+bool push_to_buf(data_buf_t* buf, char* data, size_t n_bytes);
+bool init_buffer(request_t* r, size_t size);
 #endif /* REQUEST_POOL_H_INCLUDED */
