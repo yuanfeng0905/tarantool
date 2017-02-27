@@ -52,12 +52,15 @@ create_request(struct curl_ctx_s *ctx, size_t idx, size_t size_buf, request_t *r
 
     reset_request(r);
 
-    if (!init_buffer(r, size_buf)) {
+    r->headers_buf.data = (char*) malloc(size_buf * sizeof(char));
+    if (!r->headers_buf.data) {
+        say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory for buffer\n", __FILE__, __LINE__);
         return false;
     }
-
+    r->headers_buf.allocated = size_buf;
     return true;
 }
+
 
 
 static inline
@@ -73,18 +76,11 @@ reset_request(request_t *r)
         r->headers = NULL;
     }
 
-    if (r->headers_buf){
-
-        if (r->headers_buf->data) {
-            free(r->headers_buf->data);
-        }
-        r->headers_buf->data = NULL;
-        r->headers_buf->len = 0;
-        r->headers_buf->size = 0;
-        free(r->headers_buf);
-        r->headers_buf = NULL;
+    r->headers_buf.written = 0;
+    /* we need to zero all data in order not to output previous requests data*/
+    if (r->headers_buf.data) {
+        memset(r->headers_buf.data, 0, r->headers_buf.allocated * sizeof(char));
     }
-
     if (r->easy) {
         curl_easy_cleanup(r->easy);
         r->easy = NULL;
@@ -123,7 +119,7 @@ request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s, size_t size_
     if (p->mem == NULL)
         goto error_exit;
     memset(p->mem, 0, p->size * sizeof(request_t));
-    p->size_buffer = size_buffer;
+
     for (size_t i = 0; i < p->size; ++i) {
         if (!create_request(c, i, size_buffer, &p->mem[i]))
             goto error_exit;
@@ -142,8 +138,13 @@ request_pool_free(request_pool_t *p)
     assert(p);
 
     if (p->mem) {
-        for (size_t i = 0; i < p->size; ++i)
+        for (size_t i = 0; i < p->size; ++i) {
             reset_request(&p->mem[i]);
+            request_t *r = &p->mem[i];
+            if (r->headers_buf.data) {
+                free(r->headers_buf.data);
+            }
+        }
         free(p->mem);
         p->mem = NULL;
     }
@@ -167,11 +168,6 @@ request_pool_get_request(request_pool_t *p)
             r->easy = curl_easy_init();
             if (r->easy == NULL)
                 return NULL;
-            if (!r->headers_buf){
-                if (!init_buffer(r, p->size_buffer)) {
-                    return NULL;
-                }
-            }
 
             ++r->curl_ctx->stat.active_requests;
             r->pool.busy = true;
@@ -213,35 +209,4 @@ request_pool_get_free_size(request_pool_t *p)
     }
 
     return size;
-}
-
-bool
-init_buffer(request_t *r, size_t size_buf){
-    r->headers_buf = (data_buf_t*) malloc(sizeof(data_buf_t));
-
-    if (!r->headers_buf){
-        say(S_ERROR, "%s\n", "Can't allocate memory for buffer");
-        return false;
-    }
-    r->headers_buf->data = (char*) malloc(size_buf * sizeof(char));
-    if (!r->headers_buf->data){
-        say(S_ERROR ,"%s \n","Can't allocate memory for buffer");
-        return false;
-    }
-    r->headers_buf->len = 0;
-    r->headers_buf->size = size_buf;
-    return true;
-}
-
-bool
-push_to_buf(data_buf_t* buf, char* data, size_t n_bytes){
-    assert(buf);
-    assert(buf->data);
-    if (buf->len + n_bytes > buf->size) {
-        say(S_ERROR, "%s\n","not enough buffer length");
-        return false;
-    }
-    memcpy(buf->data + buf->len, data, n_bytes);
-    buf->len += n_bytes;
-    return true;
 }

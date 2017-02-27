@@ -247,7 +247,7 @@ async_request(lua_State *L)
     if (strncmp(method, "GET", 3) == 0) {
         curl_easy_setopt(r->easy, CURLOPT_HTTPGET, 1L);
     }
-    else if (strncmp(method, "HEAD", 4) == 0){
+    else if (strncmp(method, "HEAD", 4) == 0) {
         curl_easy_setopt(r->easy, CURLOPT_NOBODY, 1L);
     }
     else if (strncmp(method, "POST", 4) == 0) {
@@ -262,16 +262,16 @@ async_request(lua_State *L)
             goto error_exit;
         }
     }
-    else if (strncmp(method, "OPTIONS", 7) == 0){
+    else if (strncmp(method, "OPTIONS", 7) == 0) {
          curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "OPTIONS");  
     }
-    else if (strncmp(method, "DELETE", 6) == 0){
+    else if (strncmp(method, "DELETE", 6) == 0) {
          curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "DELETE");  
     }
-    else if (strncmp(method, "TRACE", 5) == 0){
+    else if (strncmp(method, "TRACE", 5) == 0) {
          curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "TRACE");  
     }
-    else if (strncmp(method, "CONNECT", 6) == 0){
+    else if (strncmp(method, "CONNECT", 6) == 0) {
          curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "CONNECT");  
     }
     else {
