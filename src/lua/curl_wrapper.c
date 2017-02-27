@@ -403,6 +403,7 @@ header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
         /*we just won't write anything to buffer. Only log about error. But not hang with done_cb*/
         return bytes;
     }
+    assert(r->headers_buf.data);
     memcpy(r->headers_buf.data + r->headers_buf.written, buffer, bytes);
     r->headers_buf.written += bytes;
 

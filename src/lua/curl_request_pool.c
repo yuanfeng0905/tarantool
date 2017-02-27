@@ -81,6 +81,7 @@ reset_request(request_t *r)
     if (r->headers_buf.data) {
         memset(r->headers_buf.data, 0, r->headers_buf.allocated * sizeof(char));
     }
+
     if (r->easy) {
         curl_easy_cleanup(r->easy);
         r->easy = NULL;
