@@ -114,7 +114,7 @@ typedef struct {
   /* Set to true to enable pipelining for this multi handle */
   bool pipeline;
 
-  /* Maximum number of entries in the requestection cache */
+  /* Maximum number of entries in the requestaction cache */
   long max_conns;
 
   size_t pool_size;
@@ -136,7 +136,9 @@ curl_ctx_t*
 curl_ctx_new_easy(void) {
   const curl_args_t a = { .pipeline = false,
                           .max_conns = 5,
-                          .pool_size = 1000 };
+                          .pool_size = 1000,
+                          .buffer_size = 2048 
+                        };
   return curl_ctx_new(&a);
 }
 /* }}} */
@@ -152,10 +154,6 @@ static inline void free_request(curl_ctx_t *ctx, request_t *r) {
 }
 
 CURLMcode request_start(request_t *c, const request_start_args_t *a);
-
-#if defined (MY_DEBUG)
-request_t* new_request_test(curl_ctx_t *l, const char *url);
-#endif /* MY_DEBUG */
 
 static inline
 bool

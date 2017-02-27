@@ -29,7 +29,6 @@
  * SUCH DAMAGE.
  */
 
-#include "curl_debug.h"
 #include "curl_wrapper.h"
 
 #include <stdlib.h>
@@ -62,7 +61,6 @@ is_mcode_good_(const char *where __attribute__((unused)),
     if (code == CURLM_OK)
         return true;
 
-#if defined (MY_DEBUG)
     const char *s;
 
     switch(code) {
@@ -93,11 +91,9 @@ is_mcode_good_(const char *where __attribute__((unused)),
       return true;
     }
 
-    dd("ERROR: %s returns = %s", where, s);
-#else /* MY_DEBUG */
+    say_info("ERROR: %s returns = %s", where, s);
     if (code == CURLM_BAD_SOCKET)
       return true;
-#endif
 
     return false;
 }
@@ -111,8 +107,6 @@ multi_timer_cb(CURLM *multi __attribute__((unused)),
               long timeout_ms,
               void *ctx)
 {
-    dd("timeout_ms = %li", timeout_ms);
-
     curl_ctx_t *l = (curl_ctx_t *) ctx;
 
     ev_timer_stop(l->loop, &l->timer_event);
@@ -140,8 +134,6 @@ check_multi_info(curl_ctx_t *l)
     request_t  *r;
     long       http_code;
 
-    dd("REMAINING: still_running = %d", l->still_running);
-
     while ((msg = curl_multi_info_read(l->multi, &msgs_left))) {
 
         if (msg->msg != CURLMSG_DONE)
@@ -154,7 +146,7 @@ check_multi_info(curl_ctx_t *l)
         curl_easy_getinfo(easy, CURLINFO_EFFECTIVE_URL, &eff_url);
         curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
 
-        dd("DONE: url = %s, curl_code = %d, http_code = %d",
+        say_info("DONE: url = %s, curl_code = %d, http_code = %d",
                 eff_url, curl_code, (int) http_code);
 
         if (curl_code != CURLE_OK)
@@ -165,12 +157,12 @@ check_multi_info(curl_ctx_t *l)
         else
             ++l->stat.http_other_responses;
 
-        if (r->headers_buf->data && r->lua_ctx.fn_ctx != LUA_REFNIL){
+        if (r->headers_buf.data && r->lua_ctx.fn_ctx != LUA_REFNIL) {
             /* we need to fill the field response_headers */
             /* table on the top of stack */
             lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx);
             lua_pushstring(r->lua_ctx.L, "response_headers");
-            lua_pushstring(r->lua_ctx.L, r->headers_buf->data);
+            lua_pushstring(r->lua_ctx.L, r->headers_buf.data);
             lua_settable(r->lua_ctx.L, -3);
         }
 
@@ -200,8 +192,6 @@ event_cb(EV_P_ struct ev_io *w, int revents)
 {
     (void) loop;
 
-    dd("w = %p, revents = %d", (void *) w, revents);
-
     curl_ctx_t *l = (curl_ctx_t*) w->data;
 
     const int action = ( (revents & EV_READ ? CURL_POLL_IN : 0) |
@@ -214,7 +204,7 @@ event_cb(EV_P_ struct ev_io *w, int revents)
     check_multi_info(l);
 
     if (l->still_running <= 0) {
-        dd("last transfer done, kill timeout");
+        say_info("last transfer done, kill timeout");
         ev_timer_stop(l->loop, &l->timer_event);
     }
 }
@@ -228,7 +218,7 @@ timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
 {
     (void) loop;
 
-    dd("w = %p, revents = %i", (void *) w, revents);
+    say_info("w = %p, revents = %i", (void *) w, revents);
 
     curl_ctx_t *l = (curl_ctx_t *) w->data;
     CURLMcode rc = curl_multi_socket_action(l->multi, CURL_SOCKET_TIMEOUT, 0,
@@ -245,7 +235,7 @@ static inline
 void
 remsock(sock_t *f, curl_ctx_t *l)
 {
-    dd("removing socket");
+    say_info("removing socket");
 
     if (f == NULL)
         return;
@@ -269,7 +259,7 @@ setsock(sock_t *f,
         int act,
         curl_ctx_t *l)
 {
-    dd("set new socket");
+    say_info("set new socket");
 
     const int kind = ( (act & CURL_POLL_IN ? EV_READ : 0) |
                        (act & CURL_POLL_OUT ? EV_WRITE : 0) );
@@ -321,12 +311,10 @@ sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
     curl_ctx_t *l = (curl_ctx_t*) cbp;
     sock_t    *fdp = (sock_t*) sockp;
 
-#if defined(MY_DEBUG)
     static const char *whatstr[] = {
         "none", "IN", "OUT", "INOUT", "REMOVE" };
-#endif /* MY_DEBUG */
 
-    dd("e = %p, s = %i, what = %s, cbp = %p, sockp = %p",
+    say_info("e = %p, s = %i, what = %s, cbp = %p, sockp = %p",
             e, s, whatstr[what], cbp, sockp);
 
     if (what == CURL_POLL_REMOVE)
@@ -337,7 +325,7 @@ sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
                 return 1;
             }
         else {
-            dd("Changing action from = %s, to = %s",
+            say_info("Changing action from = %s, to = %s",
                     whatstr[fdp->action], whatstr[what]);
             setsock(fdp, s, e, what, l);
         }
@@ -353,7 +341,7 @@ static
 size_t
 read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 {
-    dd("size = %zu, nmemb = %zu", size, nmemb);
+    say_info("size = %zu, nmemb = %zu", size, nmemb);
 
     request_t    *r         = (request_t *) ctx;
     const size_t total_size = size * nmemb;
@@ -380,7 +368,7 @@ static
 size_t
 write_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 {
-    dd("size = %zu, nmemb = %zu", size, nmemb);
+    say_info("size = %zu, nmemb = %zu", size, nmemb);
 
     request_t    *r    = (request_t *) ctx;
     const size_t bytes = size * nmemb;
@@ -403,14 +391,21 @@ static
 size_t
 header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
 {
-    dd("size = %zu, mitems = %zu", size, nitems);
+    say_info("size = %zu, mitems = %zu", size, nitems);
     request_t *r = (request_t*) ctx;
     const size_t bytes = size * nitems;
 
-    bool err = push_to_buf(r->headers_buf, buffer, bytes);
-    if (!err){
-        return 0;
+    if (r->headers_buf.written + bytes > r->headers_buf.allocated) {
+        say(S_ERROR, "in %s:%d \
+                not enough alocated memory in data buffer.\
+                consider increasing \"buffer_size\" in http-client initialization.\n", 
+                __FILE__, __LINE__);
+        /*we just won't write anything to buffer. Only log about error. But not hang with done_cb*/
+        return bytes;
     }
+    memcpy(r->headers_buf.data + r->headers_buf.written, buffer, bytes);
+    r->headers_buf.written += bytes;
+
     return bytes;
 }
 
@@ -435,14 +430,14 @@ request_start(request_t *r, const request_start_args_t *a)
         curl_easy_setopt(r->easy, CURLOPT_TCP_KEEPIDLE, a->keepalive_idle);
         curl_easy_setopt(r->easy, CURLOPT_TCP_KEEPINTVL,
                                   a->keepalive_interval);
-        if (!request_add_header(r, "requestection: Keep-Alive") &&
+        if (!request_add_header(r, "requestaction: Keep-Alive") &&
             !request_add_header_keepalive(r, a))
         {
             ++r->curl_ctx->stat.failed_requests;
             return CURLM_OUT_OF_MEMORY;
         }
     } else {
-        if (!request_add_header(r, "requestection: close")) {
+        if (!request_add_header(r, "requestaction: close")) {
             ++r->curl_ctx->stat.failed_requests;
             return CURLM_OUT_OF_MEMORY;
         }
@@ -502,35 +497,6 @@ request_start(request_t *r, const request_start_args_t *a)
 
     return rc;
 }
-
-
-#if defined (MY_DEBUG)
-request_t*
-new_request_test(curl_ctx_t *l, const char *url)
-{
-    request_t *r = new_request(l);
-    if (url == NULL)
-        return NULL;
-
-    curl_easy_setopt(r->easy, CURLOPT_URL, url);
-
-    request_start_args_t a;
-    request_start_args_init(&a);
-
-    a.keepalive_interval = 60;
-    a.keepalive_idle = 120;
-    a.read_timeout = 2;
-
-    if (request_start(r, &a) != CURLM_OK)
-        goto error_exit;
-
-    return r;
-
-error_exit:
-    free_request(l, r);
-    return NULL;
-}
-#endif /* MY_DEBUG */
 
 
 curl_ctx_t*
