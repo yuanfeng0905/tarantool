@@ -143,25 +143,44 @@ struct vy_mem {
 	struct key_def *key_def;
 	/** version is initially 0 and is incremented on every write */
 	uint32_t version;
+	/** Schema version at the time of creation. */
+	uint32_t sc_version;
 	/** Allocator for extents */
 	struct lsregion *allocator;
 	/** The last LSN for lsregion allocator */
 	const int64_t *allocator_lsn;
+	/** Format of vy_mem statements without column mask. */
+	struct tuple_format *format;
+	/** Format of vy_mem statements with column mask. */
+	struct tuple_format *format_with_colmask;
 };
 
 /**
  * Instantiate a new in-memory level.
  *
  * @param key_def key definition.
- * @param format tuple format.
  * @param allocator lsregioni allocator to use for BPS tree extents
  * @param allocator_lsn a pointer to the latest LSN for lsregion.
+ * @param format tuple format.
  * @retval new vy_mem instance on success.
  * @retval NULL on error, check diag.
  */
 struct vy_mem *
 vy_mem_new(struct key_def *key_def, struct lsregion *allocator,
-	   const int64_t *allocator_lsn);
+	   const int64_t *allocator_lsn, struct tuple_format *format,
+	   struct tuple_format *format_with_colmask);
+
+/**
+ * Update formats of vy_mem statements, if vy_mem still is empty.
+ * @param mem Memory index to update formats.
+ * @param new_format New format for statements without column
+ *                   mask.
+ * @param new_format_with_colmask New format for statements with
+ *                   column mask.
+ */
+void
+vy_mem_update_formats(struct vy_mem *mem, struct tuple_format *new_format,
+		      struct tuple_format *new_format_with_colmask);
 
 /**
  * Delete in-memory level.
@@ -179,7 +198,6 @@ vy_mem_older_lsn(struct vy_mem *mem, const struct tuple *stmt);
  * Insert a statement into the in-memory level.
  *
  * @param mem        vy_mem.
- * @param mem_format Format of the mem statements.
  * @param stmt       Vinyl statement.
  * @param alloc_lsn  LSN for lsregion allocator.
  *
@@ -187,8 +205,7 @@ vy_mem_older_lsn(struct vy_mem *mem, const struct tuple *stmt);
  * @retval -1 Memory error.
  */
 int
-vy_mem_insert(struct vy_mem *mem, struct tuple_format *mem_format,
-	      const struct tuple *stmt, int64_t alloc_lsn);
+vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt, int64_t alloc_lsn);
 
 /**
  * Iterator for in-memory level.
@@ -212,8 +229,6 @@ struct vy_mem_iterator {
 
 	/* mem */
 	struct vy_mem *mem;
-	/** Format for copying tuples from lsregion. */
-	struct tuple_format *format;
 
 	/* Search options */
 	/**
@@ -256,8 +271,7 @@ struct vy_mem_iterator {
 void
 vy_mem_iterator_open(struct vy_mem_iterator *itr, struct vy_iterator_stat *stat,
 		     struct vy_mem *mem, enum iterator_type iterator_type,
-		     const struct tuple *key, const int64_t *vlsn,
-		     struct tuple_format *format);
+		     const struct tuple *key, const int64_t *vlsn);
 
 #if defined(__cplusplus)
 } /* extern "C" */

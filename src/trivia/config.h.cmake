@@ -31,19 +31,15 @@
 #cmakedefine TARGET_OS_LINUX 1
 /*  Defined if building for FreeBSD */
 #cmakedefine TARGET_OS_FREEBSD 1
+/*  Defined if building for NetBSD */
+#cmakedefine TARGET_OS_NETBSD 1
 /*  Defined if building for Darwin */
 #cmakedefine TARGET_OS_DARWIN 1
 
-#ifdef TARGET_OS_LINUX
-#define TARANTOOL_LIBEXT "so"
-#endif
-
-#ifdef TARGET_OS_FREEBSD
-#define TARANTOOL_LIBEXT "so"
-#endif
-
 #ifdef TARGET_OS_DARWIN
 #define TARANTOOL_LIBEXT "dylib"
+#else
+#define TARANTOOL_LIBEXT "so"
 #endif
 
 /*
@@ -91,16 +87,6 @@
 #define fdatasync fsync
 #endif
 #endif
-
-/*
- * Defined if this platform has BSD specific funopen()
- */
-#cmakedefine HAVE_FUNOPEN 1
-
-/*
- * Defined if this platform has GNU specific fopencookie()
- */
-#cmakedefine HAVE_FOPENCOOKIE 1
 
 /*
  * Defined if this platform has GNU specific memmem().
@@ -179,9 +165,6 @@
 
 #cmakedefine HAVE_PRCTL_H 1
 
-#cmakedefine HAVE_OPEN_MEMSTREAM 1
-#cmakedefine HAVE_FMEMOPEN 1
-
 #cmakedefine HAVE_UUIDGEN 1
 #cmakedefine HAVE_CLOCK_GETTIME 1
 #cmakedefine HAVE_CLOCK_GETTIME_DECL 1
@@ -197,10 +180,6 @@
 
 #cmakedefine HAVE_PTHREAD_GETATTR_NP 1
 #cmakedefine HAVE_PTHREAD_ATTR_GET_NP 1
-
-#if defined(HAVE_PTHREAD_ATTR_GET_NP)
-#define pthread_getattr_np pthread_attr_get_np
-#endif
 
 #cmakedefine HAVE_PTHREAD_GET_STACKSIZE_NP 1
 #cmakedefine HAVE_PTHREAD_GET_STACKADDR_NP 1

@@ -91,7 +91,8 @@
 void
 access_check_ddl(uint32_t owner_uid, enum schema_object_type type)
 {
-	struct credentials *cr = current_user();
+	struct session *session = current_session();
+	struct credentials *cr = &session->credentials;
 	/*
 	 * Only the owner of the object can be the grantor
 	 * of the privilege on the object. This means that
@@ -248,7 +249,7 @@ opt_set(void *opts, const struct opt_def *def, const char **val)
 		str = mp_decode_str(val, &str_len);
 		str_len = MIN(str_len, def->len - 1);
 		memcpy(opt, str, str_len);
-		opt[str_len + 1] = '\0';
+		opt[str_len] = '\0';
 		break;
 	default:
 		unreachable();

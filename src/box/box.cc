@@ -87,7 +87,7 @@ bool box_snapshot_is_in_progress = false;
  * it also means we've successfully connected to the master
  * and began receiving updates from it.
  */
-static bool box_init_done = false;
+static bool is_box_configured = false;
 static bool is_ro = true;
 
 /**
@@ -107,6 +107,14 @@ static struct xstream subscribe_stream;
  * threads.
  */
 static struct fiber_pool tx_fiber_pool;
+/**
+ * A separate endpoint for WAL wakeup messages, to
+ * ensure that WAL messages are delivered even
+ * if all fibers in tx_fiber_pool are used. Without
+ * this endpoint, tx thread could deadlock when there
+ * are too many messages in flight (gh-1892).
+ */
+static struct cbus_endpoint tx_prio_endpoint;
 
 static void
 box_check_writable(void)
@@ -456,11 +464,11 @@ box_sync_replication_source(double timeout)
 void
 box_set_replication_source(void)
 {
-	if (!box_init_done) {
+	if (!is_box_configured) {
 		/*
 		 * Do nothing, we're in local hot standby mode, the server
 		 * will automatically begin following the replica when local
-		 * hot standby mode is finished, see box_init().
+		 * hot standby mode is finished, see box_cfg().
 		 */
 		return;
 	}
@@ -827,6 +835,7 @@ space_truncate(struct space *space)
 		 * collected automatically.
 		 */
 		tuple = key_def_tuple_update_lsn(indexes[i], lsn);
+		TupleRefNil ref(tuple);
 		uint32_t bsize;
 		const char *data = tuple_data_range(tuple, &bsize);
 		if (box_insert(BOX_INDEX_ID, data, data + bsize, NULL))
@@ -890,7 +899,8 @@ static inline struct func *
 access_check_func(const char *name, uint32_t name_len)
 {
 	struct func *func = func_by_name(name, name_len);
-	struct credentials *credentials = current_user();
+	struct session *session = current_session();
+	struct credentials *credentials = &session->credentials;
 	/*
 	 * If the user has universal access, don't bother with checks.
 	 * No special check for ADMIN user is necessary
@@ -999,10 +1009,13 @@ box_process_call(struct request *request, struct obuf *out)
 	 * a set-definer-uid one. If the function is not
 	 * defined, it's obviously not a setuid one.
 	 */
-	struct credentials *orig_credentials = NULL;
+
+	struct credentials orig_credentials;
+	struct session *session;
 	if (func && func->def.setuid) {
-		orig_credentials = current_user();
-		/* Remember and change the current user id. */
+		/* Save original credentials */
+		session = current_session();
+		credentials_copy(&orig_credentials, &session->credentials);
 		if (func->owner_credentials.auth_token >= BOX_USER_MAX) {
 			/*
 			 * Fill the cache upon first access, since
@@ -1011,9 +1024,13 @@ box_process_call(struct request *request, struct obuf *out)
 			 * system spaces from a snapshot).
 			 */
 			struct user *owner = user_find_xc(func->def.uid);
-			credentials_init(&func->owner_credentials, owner);
+			credentials_init(&func->owner_credentials,
+					 owner->auth_token,
+					 owner->def.uid);
 		}
-		fiber_set_user(fiber(), &func->owner_credentials);
+		/* Set credentials to function owner (SUID) */
+		credentials_copy(&session->credentials,
+				 &func->owner_credentials);
 	}
 
 	int rc;
@@ -1022,9 +1039,11 @@ box_process_call(struct request *request, struct obuf *out)
 	} else {
 		rc = box_lua_call(request, out);
 	}
-	/* Restore the original user */
-	if (orig_credentials)
-		fiber_set_user(fiber(), orig_credentials);
+
+	if (func && func->def.setuid) {
+		/* Restore original credentials after SUID */
+		credentials_copy(&session->credentials, &orig_credentials);
+	}
 
 	if (rc != 0) {
 		txn_rollback();
@@ -1067,7 +1086,7 @@ box_process_auth(struct request *request, struct obuf *out)
 	assert(request->type == IPROTO_AUTH);
 
 	/* Check that bootstrap has been finished */
-	if (!box_init_done)
+	if (!is_box_configured)
 		tnt_raise(ClientError, ER_LOADING);
 
 	const char *user = request->key;
@@ -1126,7 +1145,7 @@ box_process_join(struct ev_io *io, struct xrow_header *header)
 	xrow_decode_join(header, &server_uuid);
 
 	/* Check that bootstrap has been finished */
-	if (!box_init_done)
+	if (!is_box_configured)
 		tnt_raise(ClientError, ER_LOADING);
 
 	/* Forbid connection to itself */
@@ -1200,7 +1219,7 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	assert(header->type == IPROTO_SUBSCRIBE);
 
 	/* Check that bootstrap has been finished */
-	if (!box_init_done)
+	if (!is_box_configured)
 		tnt_raise(ClientError, ER_LOADING);
 
 	struct tt_uuid cluster_uuid = uuid_nil, replica_uuid = uuid_nil;
@@ -1300,7 +1319,7 @@ box_free(void)
 	 * See gh-584 "box_free() is called even if box is not
 	 * initialized
 	 */
-	if (box_init_done) {
+	if (is_box_configured) {
 #if 0
 		session_free();
 		cluster_free();
@@ -1451,20 +1470,18 @@ bootstrap(struct vclock *start_vclock)
 		panic("failed to save a snapshot");
 }
 
-static inline void
+static void
+tx_prio_cb(struct ev_loop *loop, ev_watcher *watcher, int events)
+{
+	(void) loop;
+	(void) events;
+	struct cbus_endpoint *endpoint = (struct cbus_endpoint *)watcher->data;
+	cbus_process(endpoint);
+}
+
+int
 box_init(void)
 {
-	tuple_init();
-	/* Join the cord interconnect as "tx" endpoint. */
-	fiber_pool_create(&tx_fiber_pool, "tx", FIBER_POOL_SIZE,
-			  FIBER_POOL_IDLE_TIMEOUT);
-
-	rmean_box = rmean_new(iproto_type_strs, IPROTO_TYPE_STAT_MAX);
-	rmean_error = rmean_new(rmean_error_strings, RMEAN_ERROR_LAST);
-
-	engine_init();
-
-	schema_init();
 	user_cache_init();
 	/*
 	 * The order is important: to initialize sessions,
@@ -1472,6 +1489,32 @@ box_init(void)
 	 * as a default session user when running triggers.
 	 */
 	session_init();
+	return 0;
+}
+
+bool
+box_is_configured(void)
+{
+	return is_box_configured;
+}
+
+static inline void
+box_cfg_xc(void)
+{
+	tuple_init();
+
+	/* Join the cord interconnect as "tx" endpoint. */
+	fiber_pool_create(&tx_fiber_pool, "tx", FIBER_POOL_SIZE,
+			  FIBER_POOL_IDLE_TIMEOUT);
+	/* Add an extra endpoint for WAL wake up/rollback messages. */
+	cbus_join(&tx_prio_endpoint, "tx_prio", tx_prio_cb, &tx_prio_endpoint);
+
+	rmean_box = rmean_new(iproto_type_strs, IPROTO_TYPE_STAT_MAX);
+	rmean_error = rmean_new(rmean_error_strings, RMEAN_ERROR_LAST);
+
+	engine_init();
+
+	schema_init();
 
 	cluster_init();
 	port_init();
@@ -1598,14 +1641,14 @@ box_init(void)
 	say_info("ready to accept requests");
 
 	fiber_gc();
-	box_init_done = true;
+	is_box_configured = true;
 }
 
 void
-box_load_cfg()
+box_cfg(void)
 {
 	try {
-		box_init();
+		box_cfg_xc();
 	} catch (Exception *e) {
 		e->log();
 		panic("can't initialize storage: %s", e->get_errmsg());
@@ -1626,7 +1669,7 @@ int
 box_snapshot()
 {
 	/* Signal arrived before box.cfg{} */
-	if (! box_init_done)
+	if (! is_box_configured)
 		return 0;
 	int rc = 0;
 	if (box_snapshot_is_in_progress) {

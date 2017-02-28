@@ -42,7 +42,8 @@
 void
 access_check_space(struct space *space, uint8_t access)
 {
-	struct credentials *cr = current_user();
+	struct session *session = current_session();
+	struct credentials *cr = &session->credentials;
 	/*
 	 * If a user has a global permission, clear the respective
 	 * privilege from the list of privileges required
@@ -117,7 +118,7 @@ space_new(struct space_def *def, struct rlist *key_list)
 				      index_count * sizeof(Index *));
 	space->def = *def;
 	Engine *engine = engine_find(def->engine_name);
-	space->format = tuple_format_new(key_list, engine->format);
+	space->format = tuple_format_new(engine->format, key_list, 0);
 	if (space->format == NULL)
 		diag_raise();
 	space->has_unique_secondary_key = has_unique_secondary_key;

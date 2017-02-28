@@ -14,6 +14,7 @@ local default_vinyl_cfg = {
     range_size          = 1024 * 1024 * 1024,
     page_size           = 8 * 1024,
     cache               = 0.5, -- 512MB
+    bloom_fpr           = 0.05,
 }
 
 -- all available options
@@ -63,6 +64,7 @@ local vinyl_template_cfg = {
     range_size          = 'number',
     page_size           = 'number',
     cache               = 'number',
+    bloom_fpr           = 'number',
 }
 
 -- types of available options
@@ -248,13 +250,20 @@ local function reload_cfg(oldcfg, cfg)
     end
 end
 
+local box_cfg_guard_whitelist = {
+    error = true;
+    internal = true;
+    index = true;
+    session = true;
+    runtime = true;
+};
+
 local box = require('box')
 -- Move all box members except 'error' to box_configured
 local box_configured = {}
 for k, v in pairs(box) do
     box_configured[k] = v
-    -- box.net.box uses box.error and box.internal
-    if k ~= 'error' and k ~= 'internal' and k ~= 'index' then
+    if not box_cfg_guard_whitelist[k] then
         box[k] = nil
     end
 end

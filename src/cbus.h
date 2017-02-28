@@ -240,8 +240,8 @@ struct cbus_endpoint {
 	struct rlist in_cbus;
 	/** The lock around the pipe. */
 	pthread_mutex_t mutex;
-	/** The pipe with incoming messages. */
-	struct stailq pipe;
+	/** A queue with incoming messages. */
+	struct stailq output;
 	/** Consumer cord loop */
 	ev_loop *consumer;
 	/** Async to notify the consumer */
@@ -255,7 +255,7 @@ static inline void
 cbus_endpoint_fetch(struct cbus_endpoint *endpoint, struct stailq *output)
 {
 	tt_pthread_mutex_lock(&endpoint->mutex);
-	stailq_concat(output, &endpoint->pipe);
+	stailq_concat(output, &endpoint->output);
 	tt_pthread_mutex_unlock(&endpoint->mutex);
 }
 
@@ -277,6 +277,10 @@ void
 cbus_join(struct cbus_endpoint *endpoint, const char *name,
 	  void (*fetch_cb)(ev_loop *, struct ev_watcher *, int), void *fetch_data);
 
+/**
+ * One round for message fetch and deliver */
+void
+cbus_process(struct cbus_endpoint *endpoint);
 
 /**
  * Run the message delivery loop until the current fiber is

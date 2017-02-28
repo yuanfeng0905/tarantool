@@ -37,6 +37,7 @@
 #include <stdbool.h>
 #include <assert.h>
 #include <msgpuck.h>
+#include <bit/bit.h>
 
 #include "tuple.h"
 #include "tuple_compare.h"
@@ -138,6 +139,37 @@ static inline void
 vy_stmt_set_n_upserts(struct tuple *stmt, uint8_t n)
 {
 	((struct vy_stmt *) stmt)->n_upserts = n;
+}
+
+/** Get the column mask of the specified tuple. */
+static inline uint64_t
+vy_stmt_column_mask(const struct tuple *tuple)
+{
+	enum iproto_type type = vy_stmt_type(tuple);
+	assert(type == IPROTO_REPLACE || type == IPROTO_DELETE);
+	(void) type;
+	if (tuple_format(tuple)->extra_size == sizeof(uint64_t)) {
+		/* Tuple has column mask */
+		const char *extra = tuple_extra(tuple);
+		return load_u64(extra);
+	}
+	return UINT64_MAX; /* return default value */
+}
+
+/**
+ * Set the column mask in the tuple.
+ * @param tuple       Tuple to set column mask.
+ * @param column_mask Bitmask of the updated columns.
+ */
+static inline void
+vy_stmt_set_column_mask(struct tuple *tuple, uint64_t column_mask)
+{
+	enum iproto_type type = vy_stmt_type(tuple);
+	assert(type == IPROTO_REPLACE || type == IPROTO_DELETE);
+	assert(tuple_format(tuple)->extra_size == sizeof(uint64_t));
+	(void) type;
+	char *extra = (char *) tuple_extra(tuple);
+	store_u64(extra, column_mask);
 }
 
 /**
@@ -339,13 +371,6 @@ vy_stmt_new_surrogate_delete_from_key(struct tuple_format *format,
 struct tuple *
 vy_stmt_new_surrogate_delete(struct tuple_format *format,
 			     const struct tuple *tuple);
-
-/**
- * @copydoc vy_stmt_new_surrogate_replace()
- */
-struct tuple *
-vy_stmt_new_surrogate_replace(struct tuple_format *format,
-			      const struct tuple *tuple);
 
 /**
  * Create the REPLACE statement from raw MessagePack data.

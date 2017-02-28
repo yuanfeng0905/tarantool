@@ -33,6 +33,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 /*
  * Data stored in vinyl is organized in ranges and runs.
@@ -60,7 +61,8 @@ struct mh_i64ptr_t;
 enum vy_log_type {
 	/**
 	 * Create a new index.
-	 * Requires vy_log_record::index_id.
+	 * Requires vy_log_record::index_id, iid, space_id,
+	 * path, path_len.
 	 */
 	VY_LOG_CREATE_INDEX		= 0,
 	/**
@@ -80,15 +82,43 @@ enum vy_log_type {
 	 */
 	VY_LOG_DELETE_RANGE		= 3,
 	/**
-	 * Insert a new run into a range.
+	 * Prepare a run file.
+	 * Requires vy_log_record::index_id, run_id.
+	 *
+	 * Record of this type is written before creating a run file.
+	 * It is needed to keep track of unfinished due to errors run
+	 * files so that we could remove them after recovery.
+	 */
+	VY_LOG_PREPARE_RUN		= 4,
+	/**
+	 * Insert a run into a range.
 	 * Requires vy_log_record::range_id, run_id.
 	 */
-	VY_LOG_INSERT_RUN		= 4,
+	VY_LOG_INSERT_RUN		= 5,
 	/**
 	 * Delete a run.
 	 * Requires vy_log_record::run_id.
+	 *
+	 * A record of this type indicates that the run is not in use
+	 * any more and its files can be safely removed. When the log
+	 * is recovered from, this only marks the run as deleted,
+	 * because we still need it for garbage collection. A run is
+	 * actually freed by VY_LOG_FORGET_RUN. Runs that were
+	 * deleted, but not "forgotten" are not expunged from the log
+	 * on rotation.
 	 */
-	VY_LOG_DELETE_RUN		= 5,
+	VY_LOG_DELETE_RUN		= 6,
+	/**
+	 * Forget a run.
+	 * Requires vy_log_record::run_id.
+	 *
+	 * A record of this type is written after all files left from
+	 * an unused run have been successfully removed. On recovery,
+	 * this results in freeing all structures associated with the
+	 * run. Information about "forgotten" runs is not included in
+	 * the new log on rotation.
+	 */
+	VY_LOG_FORGET_RUN		= 7,
 
 	vy_log_MAX
 };
@@ -113,12 +143,18 @@ struct vy_log_record {
 	const char *range_begin;
 	/** Msgpack key for end of a range. */
 	const char *range_end;
+	/** Ordinal index number in the space. */
+	uint32_t iid;
+	/** Space ID. */
+	uint32_t space_id;
 	/**
-	 * This flag is never written to the metadata log.
-	 * It is used on recovery to indicate that the index
-	 * being recovered was dropped.
+	 * Path to the index. Empty string if default path is used.
+	 * Note, the string is not necessarily nul-termintaed, its
+	 * length is stored in path_len.
 	 */
-	bool is_dropped;
+	const char *path;
+	/** Length of the path string. */
+	uint32_t path_len;
 };
 
 /**
@@ -128,6 +164,10 @@ struct vy_log_record {
 enum { VY_LOG_TX_BUF_SIZE = 64 };
 
 struct vy_recovery;
+
+typedef int
+(*vy_log_gc_cb)(int64_t run_id, uint32_t iid, uint32_t space_id,
+		const char *path, void *arg);
 
 /** Vinyl metadata log object. */
 struct vy_log {
@@ -139,6 +179,10 @@ struct vy_log {
 	int64_t signature;
 	/** Recovery context. */
 	struct vy_recovery *recovery;
+	/** Garbage collection callback. */
+	vy_log_gc_cb gc_cb;
+	/** Argument to the garbage collection callback. */
+	void *gc_arg;
 	/**
 	 * Latch protecting the xlog.
 	 *
@@ -167,11 +211,14 @@ struct vy_log {
 /**
  * Allocate and initialize a vy_log structure.
  * @dir is the directory to store log files in.
+ * @gc_cb is the callback that will be called on deleted runs
+ * on log rotation (see vy_log_rotate()).
+ * @gc_arg is an argument passed to @gc_cb.
  *
  * Returns NULL on memory allocation failure.
  */
 struct vy_log *
-vy_log_new(const char *dir);
+vy_log_new(const char *dir, vy_log_gc_cb gc_cb, void *gc_arg);
 
 /*
  * Create the initial xlog file having signature 0.
@@ -195,6 +242,13 @@ vy_log_delete(struct vy_log *log);
  * The goal of log rotation is to compact the log file by
  * discarding records cancelling each other and records left
  * from dropped indexes.
+ *
+ * The function calls @gc_cb for each deleted run, passing info
+ * necessary to lookup its files and optional argument @gc_arg.
+ * The callback is supposed to try to unlink run files and
+ * return 0 on success. If it fails, the information about the
+ * deleted run won't be removed from the log and deletion will
+ * be retried on next log rotation.
  *
  * Returns 0 on success, -1 on failure.
  */
@@ -296,7 +350,9 @@ typedef int
  *
  * For each range and run of the index, this function calls @cb passing
  * a log record and an optional @cb_arg to it. A log record type is
- * either VY_LOG_CREATE_INDEX, VY_LOG_INSERT_RANGE, or VY_LOG_INSERT_RUN.
+ * either VY_LOG_CREATE_INDEX, VY_LOG_INSERT_RANGE, or VY_LOG_INSERT_RUN
+ * unless the index was dropped. In the latter case, a VY_LOG_DROP_INDEX
+ * record is issued in the end.
  * The callback is supposed to rebuild the index structure and open run
  * files. If the callback returns a non-zero value, the function stops
  * iteration over ranges and runs and returns error.
@@ -312,11 +368,16 @@ vy_log_recover_index(struct vy_log *log, int64_t index_id,
 
 /** Helper to log an index creation. */
 static inline void
-vy_log_create_index(struct vy_log *log, int64_t index_id)
+vy_log_create_index(struct vy_log *log, int64_t index_id,
+		    uint32_t iid, uint32_t space_id, const char *path)
 {
 	struct vy_log_record record = {
 		.type = VY_LOG_CREATE_INDEX,
 		.index_id = index_id,
+		.iid = iid,
+		.space_id = space_id,
+		.path = path,
+		.path_len = strlen(path),
 	};
 	vy_log_write(log, &record);
 }
@@ -354,6 +415,18 @@ vy_log_delete_range(struct vy_log *log, int64_t range_id)
 	struct vy_log_record record = {
 		.type = VY_LOG_DELETE_RANGE,
 		.range_id = range_id,
+	};
+	vy_log_write(log, &record);
+}
+
+/** Helper to log a run file creation. */
+static inline void
+vy_log_prepare_run(struct vy_log *log, int64_t index_id, int64_t run_id)
+{
+	struct vy_log_record record = {
+		.type = VY_LOG_PREPARE_RUN,
+		.index_id = index_id,
+		.run_id = run_id,
 	};
 	vy_log_write(log, &record);
 }

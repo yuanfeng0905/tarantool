@@ -101,6 +101,7 @@ struct vy_stmt_iterator_iface {
 	vy_iterator_next_key_f next_key;
 	vy_iterator_next_lsn_f next_lsn;
 	vy_iterator_restore_f restore;
+	vy_iterator_close_f cleanup;
 	vy_iterator_close_f close;
 };
 
@@ -119,6 +120,8 @@ struct vy_iterator_stat {
 	size_t lookup_count;
 	/* Number of sequential iterations */
 	size_t step_count;
+	/* Number of searches avoided using bloom filter */
+	size_t bloom_reflections;
 };
 
 #if defined(__cplusplus)

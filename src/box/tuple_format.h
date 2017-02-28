@@ -119,11 +119,23 @@ extern struct tuple_format_vtab memtx_tuple_format_vtab;
  * Tuple format describes how tuple is stored and information about its fields
  */
 struct tuple_format {
+	/** Virtual function table */
 	struct tuple_format_vtab vtab;
-
+	/** Identifier */
 	uint16_t id;
-	/* Format objects are reference counted. */
+	/** Reference counter */
 	int refs;
+	/**
+	 * The number of extra bytes to reserve in tuples before
+	 * field map.
+	 * \sa struct tuple
+	 */
+	uint16_t extra_size;
+	/**
+	 * Size of field map of tuple in bytes.
+	 * \sa struct tuple
+	 */
+	uint16_t field_map_size;
 	/**
 	 * If not set (== 0), any tuple in the space can have any number of
 	 * fields. If set, each tuple must have exactly this number of fields.
@@ -131,12 +143,6 @@ struct tuple_format {
 	uint32_t exact_field_count;
 	/* Length of 'fields' array. */
 	uint32_t field_count;
-	/**
-	 * Size of field map of tuple in bytes.
-	 * See tuple_field_format::ofset for details//
-	 */
-	uint16_t field_map_size;
-
 	/* Formats of the fields */
 	struct tuple_field_format fields[];
 };
@@ -180,14 +186,16 @@ tuple_format_ref(struct tuple_format *format, int count)
 
 /**
  * Allocate, construct and register a new in-memory tuple format.
- * @param key_list List of key_defs of a space.
- * @param name  name of the tuple format
+ * @param vtab             Virtual function table for specific engines.
+ * @param key_list         List of key_defs of a space.
+ * @param extra_size       Extra bytes to reserve in tuples metadata.
  *
  * @retval not NULL Tuple format.
  * @retval     NULL Memory error.
  */
 struct tuple_format *
-tuple_format_new(struct rlist *key_list, struct tuple_format_vtab *vtab);
+tuple_format_new(struct tuple_format_vtab *vtab, struct rlist *key_list,
+		 uint16_t extra_size);
 
 /**
  * Register the duplicate of the specified format.
@@ -198,6 +206,19 @@ tuple_format_new(struct rlist *key_list, struct tuple_format_vtab *vtab);
  */
 struct tuple_format *
 tuple_format_dup(const struct tuple_format *src);
+
+/**
+ * Returns the total size of tuple metadata of this format.
+ * See @link struct tuple @endlink for explanation of tuple layout.
+ *
+ * @param format Tuple Format.
+ * @returns the total size of tuple metadata
+ */
+static inline uint16_t
+tuple_format_meta_size(const struct tuple_format *format)
+{
+	return format->extra_size + format->field_map_size;
+}
 
 /**
  * Fill the field map of tuple with field offsets.
