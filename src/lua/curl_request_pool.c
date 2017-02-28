@@ -77,10 +77,6 @@ reset_request(request_t *r)
     }
 
     r->headers_buf.written = 0;
-    /* we need to zero all data in order not to output previous requests data*/
-    if (r->headers_buf.data) {
-        memset(r->headers_buf.data, 0, r->headers_buf.allocated * sizeof(char));
-    }
 
     if (r->easy) {
         curl_easy_cleanup(r->easy);

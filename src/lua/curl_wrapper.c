@@ -394,8 +394,8 @@ header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
     say_info("size = %zu, mitems = %zu", size, nitems);
     request_t *r = (request_t*) ctx;
     const size_t bytes = size * nitems;
-
-    if (r->headers_buf.written + bytes > r->headers_buf.allocated) {
+    /* one more byte in condition for zero byte at the end of read chunk */
+    if (r->headers_buf.written + bytes + 1 > r->headers_buf.allocated) {
         say(S_ERROR, "in %s:%d \
                 not enough alocated memory in data buffer.\
                 consider increasing \"buffer_size\" in http-client initialization.\n", 
@@ -406,7 +406,7 @@ header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
     assert(r->headers_buf.data);
     memcpy(r->headers_buf.data + r->headers_buf.written, buffer, bytes);
     r->headers_buf.written += bytes;
-
+    r->headers_buf.data[r->headers_buf.written] = 0;
     return bytes;
 }
 
