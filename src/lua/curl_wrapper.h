@@ -48,7 +48,7 @@
 
 #include "curl_request_pool.h"
 
-/** curl_ctx information, common to all requestections
+/** curl_ctx information, common to all Connections
  */
 typedef struct curl_ctx_s curl_ctx_t;
 
@@ -63,7 +63,7 @@ struct curl_ctx_s {
   int             still_running;
 
   /* Various values of statistics, it are used only for all
-   * requestection in curl context */
+   * Connection in curl context */
   struct {
     uint64_t      total_requests;
     uint64_t      http_200_responses;
@@ -79,7 +79,7 @@ struct curl_ctx_s {
 
 typedef struct {
 
-  /* Max amount of cached alive requestections */
+  /* Max amount of cached alive Connections */
   long max_conns;
 
   /* Non-universal keepalive knobs (Linux, AIX, HP-UX, more) */
@@ -89,7 +89,7 @@ typedef struct {
   /* Set the "low speed limit & time"
      If the download receives less than "low speed limit" bytes/second during
      "low speed time" seconds, the operations is aborted. You could i.e if you
-     have a pretty high speed requestection, abort if it is less than 2000
+     have a pretty high speed Connection, abort if it is less than 2000
      bytes/sec during 20 seconds;
    */
   long low_speed_time;
@@ -99,7 +99,7 @@ typedef struct {
   long read_timeout;
 
   /* Time-out connects operations after this amount of seconds, if connects are
-     OK within this time, then fine... This only aborts the requestect phase. */
+     OK within this time, then fine... This only aborts the Connect phase. */
   long connect_timeout;
 
   /* DNS cache timeout */
@@ -114,7 +114,7 @@ typedef struct {
   /* Set to true to enable pipelining for this multi handle */
   bool pipeline;
 
-  /* Maximum number of entries in the requestaction cache */
+  /* Maximum number of entries in the Connection cache */
   long max_conns;
 
   size_t pool_size;

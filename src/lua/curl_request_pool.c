@@ -77,7 +77,8 @@ reset_request(request_t *r)
     }
 
     r->headers_buf.written = 0;
-
+    if (r->headers_buf.data)
+        r->headers_buf.data[0] = 0;
     if (r->easy) {
         curl_easy_cleanup(r->easy);
         r->easy = NULL;
@@ -136,10 +137,11 @@ request_pool_free(request_pool_t *p)
 
     if (p->mem) {
         for (size_t i = 0; i < p->size; ++i) {
-            reset_request(&p->mem[i]);
             request_t *r = &p->mem[i];
+            reset_request(r);
             if (r->headers_buf.data) {
                 free(r->headers_buf.data);
+                r->headers_buf.data = NULL;
             }
         }
         free(p->mem);

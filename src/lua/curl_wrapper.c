@@ -117,7 +117,6 @@ multi_timer_cb(CURLM *multi __attribute__((unused)),
     }
     else
         timer_cb(l->loop, &l->timer_event, 0);
-
     return 0;
 }
 
@@ -389,7 +388,7 @@ write_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 
 static
 size_t
-header_cb(char *buffer,   size_t size,   size_t nitems,   void *ctx)
+header_cb(char *buffer, size_t size, size_t nitems, void *ctx)
 {
     say_info("size = %zu, mitems = %zu", size, nitems);
     request_t *r = (request_t*) ctx;
@@ -431,14 +430,14 @@ request_start(request_t *r, const request_start_args_t *a)
         curl_easy_setopt(r->easy, CURLOPT_TCP_KEEPIDLE, a->keepalive_idle);
         curl_easy_setopt(r->easy, CURLOPT_TCP_KEEPINTVL,
                                   a->keepalive_interval);
-        if (!request_add_header(r, "requestaction: Keep-Alive") &&
+        if (!request_add_header(r, "Connection: Keep-Alive") &&
             !request_add_header_keepalive(r, a))
         {
             ++r->curl_ctx->stat.failed_requests;
             return CURLM_OUT_OF_MEMORY;
         }
     } else {
-        if (!request_add_header(r, "requestaction: close")) {
+        if (!request_add_header(r, "Connection: close")) {
             ++r->curl_ctx->stat.failed_requests;
             return CURLM_OUT_OF_MEMORY;
         }
@@ -484,7 +483,7 @@ request_start(request_t *r, const request_start_args_t *a)
     if (a->low_speed_limit > 0)
         curl_easy_setopt(r->easy, CURLOPT_LOW_SPEED_LIMIT, a->low_speed_limit);
 
-    /* Headers have to seted right before add_handle() */
+    /* Headers have to be set right before add_handle() */
     if (r->headers != NULL)
         curl_easy_setopt(r->easy, CURLOPT_HTTPHEADER, r->headers);
 
@@ -532,7 +531,7 @@ curl_ctx_new(const curl_args_t *a)
     curl_multi_setopt(l->multi, CURLMOPT_TIMERDATA, (void *) l);
 
     if (a->pipeline)
-        curl_multi_setopt(l->multi, CURLMOPT_PIPELINING, 1L /* pipline on */);
+        curl_multi_setopt(l->multi, CURLMOPT_PIPELINING, 1L /* pipeline on */);
 
     if (a->max_conns > 0)
         curl_multi_setopt(l->multi, CURLMOPT_MAXCONNECTS, a->max_conns);

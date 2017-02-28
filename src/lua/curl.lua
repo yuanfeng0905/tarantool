@@ -56,7 +56,7 @@ local http = function(opts)
     opts.buffer_size = opts.buffer_size or 2048
 
     local curl = driver.new(opts.pipeline, opts.max_conns, opts.pool_size, opts.buffer_size)
-    return setmetatable({curl        = curl, },
+    return setmetatable({curl = curl, },
                          curl_mt )
 end
 
@@ -174,7 +174,7 @@ local function sync_request(self, method, url, body, opts)
     end
 
     -- Curl did a request and he has a response
-    return { code = ctx.http_code, body = ctx.response, headers=ctx.response_headers}
+    return { code = ctx.http_code, body = ctx.response, headers = ctx.response_headers}
 end
 -- }}}
 
