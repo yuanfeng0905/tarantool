@@ -21,26 +21,27 @@ test:test("basic http post/get", function(test)
     test:ok(http ~= nil, "client is created")
     local url = "http://httpbin.org/"
     local headers   = { my_header = "1", my_header2 = "2" }
-    local my_body   = { key="value" }
+    local my_body   = { key = "value" }
     local json_body = json.encode(my_body)
 
-    local r = http:get(url .. "get" ,{headers=headers})
+    local r = http:get(url .. "get" ,{headers = headers})
     test:is(r.code, 200, "http code page exists")
     test:isnt(r.body:len(), 0,"not empty body page exists")
 
     r = http:get(url .. 'this/page/not/exists',
-                       {headers=headers} )
+                       {headers = headers} )
     test:is(r.code, 404, "http_code page not exists")
     test:isnt(r.body:len(), 0, " not empty body page not exists")
 
-    r = http:get('https://tarantool.org/', {headers=headers})
+    r = http:get('https://tarantool.org/', {headers = headers})
     test:is(r.code, 200, "https check: http code page exists")
     test:isnt(r.body:len(), 0,"https check: not empty body page exists")
 
     local r = http:post('http://httpbin.org/post', json_body,
-                        {headers=headers,
+                        {headers = headers,
                          keepalive_idle = 30,
                          keepalive_interval = 60,})
+
     local obody = json.decode(r.body)
     test:ok( r.code == 200 and
             obody.headers['My-Header'] == headers.my_header and 
@@ -48,11 +49,11 @@ test:test("basic http post/get", function(test)
             "post headers")
     
     local r = http:put('http://httpbin.org/put', json_body,
-                        {headers=headers,
+                        {headers = headers,
                          keepalive_idle = 30,
                          keepalive_interval = 60,})
      
-    local obody = json.decode(r.body)
+    obody = json.decode(r.body)
     test:ok( r.code == 200 and
             obody.headers['My-Header'] == headers.my_header and 
             obody.headers['My-Header2'] == headers.my_header2,
@@ -117,7 +118,6 @@ test:test("tests with server", function(test)
     test:is(connect_data.code, 200, "HTTP:CONNECT request")
  
     http:free()
-    
     
 
     local num     = 10
