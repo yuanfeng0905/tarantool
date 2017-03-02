@@ -52,12 +52,26 @@ create_request(struct curl_ctx_s *ctx, size_t idx, size_t size_buf, request_t *r
 
     reset_request(r);
 
-    r->headers_buf.data = (char*) malloc(size_buf * sizeof(char));
-    if (!r->headers_buf.data) {
-        say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory for buffer\n", __FILE__, __LINE__);
+    r->response.headers_buf.data = (char*) malloc(size_buf * sizeof(char));
+    if (!r->response.headers_buf.data) {
+        say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory for header buffer\n", __FILE__, __LINE__);
         return false;
     }
-    r->headers_buf.allocated = size_buf;
+    r->response.headers_buf.allocated = size_buf;
+    
+    r->response.body_buf.data = (char*) malloc(size_buf * sizeof(char));
+    if (!r->response.body_buf.data) {
+        say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory for body buffer\n", __FILE__, __LINE__);
+        return false;
+    }
+    r->response.body_buf.allocated = size_buf;
+
+    r->cond = (struct ipc_cond*) malloc(sizeof(struct ipc_cond));
+    if (!r->cond) {
+        say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory for cond variable\n", __FILE__, __LINE__);
+        return false;
+    }
+    ipc_cond_create(r->cond);
     return true;
 }
 
@@ -76,30 +90,26 @@ reset_request(request_t *r)
         r->headers = NULL;
     }
 
-    r->headers_buf.written = 0;
-    if (r->headers_buf.data)
-        r->headers_buf.data[0] = 0;
+    r->response.headers_buf.written = 0;
+    if (r->response.headers_buf.data)
+        r->response.headers_buf.data[0] = 0;
+
+    r->response.body_buf.written = 0;
+    if (r->response.body_buf.data)
+        r->response.body_buf.data[0] = 0;
+
+    if (r->body) {
+        free(r->body);
+        r->body = NULL;
+    }
+    r->read = 0;
+    r->sent = 0;
+
     if (r->easy) {
         curl_easy_cleanup(r->easy);
         r->easy = NULL;
     }
 
-    if (r->lua_ctx.L) {
-        luaL_unref(r->lua_ctx.L, LUA_REGISTRYINDEX,
-                   r->lua_ctx.read_fn);
-        luaL_unref(r->lua_ctx.L, LUA_REGISTRYINDEX,
-                   r->lua_ctx.write_fn);
-        luaL_unref(r->lua_ctx.L, LUA_REGISTRYINDEX,
-                   r->lua_ctx.done_fn);
-        luaL_unref(r->lua_ctx.L, LUA_REGISTRYINDEX,
-                   r->lua_ctx.fn_ctx);
-    }
-
-    r->lua_ctx.L        = NULL;
-    r->lua_ctx.read_fn  = LUA_REFNIL;
-    r->lua_ctx.write_fn = LUA_REFNIL;
-    r->lua_ctx.done_fn  = LUA_REFNIL;
-    r->lua_ctx.fn_ctx   = LUA_REFNIL;
 }
 
 
@@ -139,9 +149,19 @@ request_pool_free(request_pool_t *p)
         for (size_t i = 0; i < p->size; ++i) {
             request_t *r = &p->mem[i];
             reset_request(r);
-            if (r->headers_buf.data) {
-                free(r->headers_buf.data);
-                r->headers_buf.data = NULL;
+            if (r->response.headers_buf.data) {
+                free(r->response.headers_buf.data);
+                r->response.headers_buf.data = NULL;
+            }
+            if (r->response.body_buf.data) {
+                free(r->response.body_buf.data);
+                r->response.body_buf.data = NULL;
+            }
+            
+            if (r->cond){
+                ipc_cond_destroy(r->cond);
+                free(r->cond);
+                r->cond = NULL;
             }
         }
         free(p->mem);

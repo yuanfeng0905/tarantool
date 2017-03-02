@@ -30,6 +30,7 @@
  */
 
 #include "curl_driver.h"
+#include "say.h"
 #include "lua/utils.h"
 /*
    <async_request> This function does async HTTP request
@@ -39,21 +40,6 @@
         method  - HTTP method, like GET, POST, PUT and so on
         url     - HTTP url, like https://tarantool.org/doc
         options - this is a table of options.
-
-            done - name of a callback function which is invoked when a request
-                   was completed;
-
-            write - name of a callback function which is invoked if the
-                    server returns data to the client;
-                    signature is function(data, context)
-
-            read - name of a callback function which is invoked if the
-                   client passes data to the server.
-                   signature is function(content_size, context)
-
-            done - name of a callback function which is invoked when a request
-                   was completed;
-                   signature is  function(curl_code, http_code, error_message, ctx)
 
             ca_path - a path to ssl certificate dir;
 
@@ -90,7 +76,7 @@ async_request(lua_State *L)
     lib_ctx_t *ctx = ctx_get(L);
     if (ctx == NULL)
         return luaL_error(L, "can't get lib ctx");
-    ctx->done = NULL;
+    ctx->done = false;
     if (ctx->done)
         return luaL_error(L, "curl stopped");
 
@@ -103,43 +89,26 @@ async_request(lua_State *L)
 
     const char *method = luaL_checkstring(L, 2);
     const char *url    = luaL_checkstring(L, 3);
-
     /** Set Options {{{
      */
     if (lua_istable(L, 4)) {
 
         const int top = lua_gettop(L);
 
-        r->lua_ctx.L = L;
-
-        /* Read callback */
-        lua_pushstring(L, "read");
-        lua_gettable(L, 4);
-        if (lua_isfunction(L, top + 1))
-            r->lua_ctx.read_fn = luaL_ref(L, LUA_REGISTRYINDEX);
-        else
-            lua_pop(L, 1);
-
-        /* Write callback */
-        lua_pushstring(L, "write");
-        lua_gettable(L, 4);
-        if (lua_isfunction(L, top + 1))
-            r->lua_ctx.write_fn = luaL_ref(L, LUA_REGISTRYINDEX);
-        else
-            lua_pop(L, 1);
-
-        /* Done callback */
-        lua_pushstring(L, "done");
-        lua_gettable(L, 4);
-        if (lua_isfunction(L, top + 1))
-            r->lua_ctx.done_fn = luaL_ref(L, LUA_REGISTRYINDEX);
-        else
-            lua_pop(L, 1);
-
         /* callback's context */
-        lua_pushstring(L, "ctx");
+        lua_pushstring(L, "body");
         lua_gettable(L, 4);
-        r->lua_ctx.fn_ctx = luaL_ref(L, LUA_REGISTRYINDEX);
+
+        const char* tmp = lua_tolstring(L, -1, &r->read);
+        if (tmp && r->read > 0) {
+            r->body = (char*) malloc(sizeof(char) * r->read);
+            if (!r->body) {
+                reason = "can't allocate memory for passed body";
+                goto error_exit;
+            }
+            memcpy(r->body, tmp, r->read);
+        }
+        lua_pop(L, 1);
 
         /** Http headers */
         lua_pushstring(L, "headers");
@@ -287,14 +256,15 @@ async_request(lua_State *L)
     CURLMcode rc = request_start(r, &req_args);
     if (rc != CURLM_OK)
         goto error_exit;
-
-    return curl_make_result(L, CURL_LAST, rc);
+    ipc_cond_wait_timeout(r->cond, TIMEOUT_INFINITY);
+    int ret = curl_make_result(L, CURL_LAST, rc, r);
+    free_request(ctx->curl_ctx, r);
+    return ret;
 
 error_exit:
     free_request(ctx->curl_ctx, r);
     return luaL_error(L, reason);
 }
-
 
 static
 int
@@ -345,6 +315,212 @@ pool_stat(lua_State *L)
 
 /** Lib functions {{{
  */
+
+/** lib C API {{{
+ */
+
+int
+curl_version()
+{
+  char version[sizeof("tarantool.curl: xxx.xxx.xxx") +
+               sizeof("curl: xxx.xxx.xxx,") +
+               sizeof("libev: xxx.xxx") ];
+  say(S_INFO, "%s", "hello");
+  snprintf(version, sizeof(version) - 1,
+            "tarantool.curl: %i.%i.%i, curl: %i.%i.%i, libev: %i.%i",
+            TNT_CURL_VERSION_MAJOR,
+            TNT_CURL_VERSION_MINOR,
+            TNT_CURL_VERSION_PATCH,
+
+            LIBCURL_VERSION_MAJOR,
+            LIBCURL_VERSION_MINOR,
+            LIBCURL_VERSION_PATCH,
+
+            EV_VERSION_MAJOR,
+            EV_VERSION_MINOR );
+
+  return version;
+}
+
+
+lib_ctx_t*
+curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size)
+{
+    lib_ctx_t *ctx = (lib_ctx_t *) malloc (sizeof(lib_ctx_t));
+
+    if (ctx == NULL) {
+        say_error("In:%s:%d: Can't allocate memory for curl context", __FILE__, __LINE__);
+        return ctx;
+    }
+
+    ctx->curl_ctx = NULL;
+    ctx->done    = false;
+
+    curl_args_t args = { .pipeline = pipeline,
+                         .max_conns = max_conn,
+                         .pool_size = pool_size,
+                         .buffer_size = buffer_size
+                        };
+
+    ctx->curl_ctx = curl_ctx_new(&args);
+    if (ctx->curl_ctx == NULL) {
+        say_error("In %s:%d: curl_new failed", __FILE__, __LINE__);
+        return NULL;
+    }
+    return ctx;
+}
+
+void
+curl_free(lib_ctx_t *ctx)
+{
+    if (ctx == NULL)
+      return;
+
+    ctx->done = true;
+
+    curl_destroy(ctx->curl_ctx);
+}
+
+
+response_t
+request(lib_ctx_t *ctx, const char* method, const char* url, const options_t* options)
+{
+    const char *reason = "unknown error";
+    if (ctx == NULL) {
+        say_error("can't get lib ctx");
+        return NULL;
+    }
+    ctx->done = false;
+    if (ctx->done) {
+        say_error("curl stopped");
+        return NULL;
+    }
+
+    request_t *r = new_request(ctx->curl_ctx);
+    if (r == NULL) {
+        say_error("can't get request obj from pool");
+        return NULL;
+    }
+    request_start_args_t req_args;
+    request_start_args_init(&req_args);
+
+    /** Set Options {{{
+     */
+
+    if (options->body) {
+        r->body = (char*) malloc(sizeof(char) * r->read);
+        if (!r->body) {
+            reason = "can't allocate memory for passed body";
+            goto error_exit;
+        }
+        memcpy(r->body, tmp, r->read);
+    }
+
+    /** Http headers */
+//    lua_pushstring(L, "headers");
+//    lua_gettable(L, 4);
+//    if (!lua_isnil(L, top + 1)) {
+//        lua_pushnil(L);
+//        char header[4096];
+//        while (lua_next(L, -2) != 0) {
+//            snprintf(header, sizeof(header) - 1,
+//                    "%s: %s", lua_tostring(L, -2), lua_tostring(L, -1));
+//            if (!request_add_header(r, header)) {
+//                reason = "can't allocate memory (request_add_header)";
+//                goto error_exit;
+//            }
+//            lua_pop(L, 1);
+//        } // while
+//    }
+ 
+    /* SSL/TLS cert  {{{ */
+    if (options->ca_path)
+        curl_easy_setopt(r->easy, CURLOPT_CAPATH, options->ca_path);
+ 
+    if (options->ca_file)
+        curl_easy_setopt(r->easy, CURLOPT_CAINFO, options->ca_file);
+    /* }}} */
+ 
+    req_args.max_conns = options->max_conns;
+    req_args.keepalive_idle = options->keepalive_idle;
+    req_args.keepalive_interval = ;
+    req_args.low_speed_limit = options->low_speed_limit;
+    req_args.low_speed_time = options->low_speed_time;
+    req_args.read_timeout = options->read_timeout;
+    req_args.connect_timeout = options->connect_timeout;
+    req_args.dns_cache_timeout = options->dns_cache_timeout;
+ 
+    /* Debug- / Internal- options */
+    req_args.curl_verbose = options->verbose;
+
+    curl_easy_setopt(r->easy, CURLOPT_PRIVATE, (void *) r);
+
+    curl_easy_setopt(r->easy, CURLOPT_URL, url);
+    curl_easy_setopt(r->easy, CURLOPT_FOLLOWLOCATION, 1);
+
+    curl_easy_setopt(r->easy, CURLOPT_SSL_VERIFYPEER, 1);
+
+    /* Method {{{ */
+
+    if (strncmp(method, "GET", sizeof("GET") - 1) == 0) {
+        curl_easy_setopt(r->easy, CURLOPT_HTTPGET, 1L);
+    }
+    else if (strncmp(method, "HEAD", sizeof("HEAD") - 1) == 0) {
+        curl_easy_setopt(r->easy, CURLOPT_NOBODY, 1L);
+    }
+    else if (strncmp(method, "POST", sizeof("POST") - 1) == 0) {
+        if (!request_set_post(r)) {
+            reason = "can't allocate memory (request_set_post)";
+            goto error_exit;
+        }
+    }
+    else if (strncmp(method, "PUT", sizeof("PUT") - 1) == 0) {
+        if (!request_set_put(r)) {
+            reason = "can't allocate memory (request_set_put)";
+            goto error_exit;
+        }
+    }
+    else if (strncmp(method, "OPTIONS", sizeof("OPTIONS") - 1) == 0) {
+         curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "OPTIONS");  
+    }
+    else if (strncmp(method, "DELETE", sizeof("DELETE") - 1) == 0) {
+         curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "DELETE");  
+    }
+    else if (strncmp(method, "TRACE", sizeof("TRACE") - 1) == 0) {
+         curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "TRACE");  
+    }
+    else if (strncmp(method, "CONNECT", sizeof("CONNECT") - 1) == 0) {
+         curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "CONNECT");  
+    }
+    else {
+        reason = "method does not supported";
+        goto error_exit;
+    }
+    /* }}} */
+
+    /* Note that the add_handle() will set a
+     * time-out to trigger very soon so that
+     * the necessary socket_action() call will be
+     * called by this app */
+    CURLMcode rc = request_start(r, &req_args);
+    if (rc != CURLM_OK)
+        goto error_exit;
+    ipc_cond_wait_timeout(r->cond, TIMEOUT_INFINITY);
+    response_t* ret = curl_result(CURL_LAST, rc, r);
+    free_request(ctx->curl_ctx, r);
+    return ret;
+
+error_exit:
+    free_request(ctx->curl_ctx, r);
+    return luaL_error(L, reason);
+
+}
+/* }}}
+ * */
+
+
+/** lib Lua API {{{
+ */
 static
 int
 version(lua_State *L)
@@ -370,10 +546,6 @@ version(lua_State *L)
 }
 
 
-/** lib API {{{
- */
-
-static void do_free_(lib_ctx_t *ctx);
 
 static
 int
@@ -411,24 +583,12 @@ new(lua_State *L)
 }
 
 
-static
-void
-do_free_(lib_ctx_t *ctx)
-{
-    if (ctx == NULL)
-      return;
-
-    ctx->done = true;
-
-    curl_destroy(ctx->curl_ctx);
-}
-
 
 static
 int
 cleanup(lua_State *L)
 {
-    do_free_(ctx_get(L));
+    curl_free(ctx_get(L));
 
     /* remove all methods operating on ctx */
     lua_newtable(L);

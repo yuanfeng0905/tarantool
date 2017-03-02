@@ -33,6 +33,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include "ipc.h"
 
 /** Information associated with a specific socket
  */
@@ -156,29 +157,10 @@ check_multi_info(curl_ctx_t *l)
         else
             ++l->stat.http_other_responses;
 
-        if (r->headers_buf.data && r->lua_ctx.fn_ctx != LUA_REFNIL) {
-            /* we need to fill the field response_headers */
-            /* table on the top of stack */
-            lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx);
-            lua_pushstring(r->lua_ctx.L, "response_headers");
-            lua_pushstring(r->lua_ctx.L, r->headers_buf.data);
-            lua_settable(r->lua_ctx.L, -3);
-        }
-
-        if (r->lua_ctx.done_fn != LUA_REFNIL) {
-            /*
-              Signature:
-                function (curl_code, http_code, error_message, ctx)
-            */
-            lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.done_fn);
-            lua_pushinteger(r->lua_ctx.L, (int) curl_code);
-            lua_pushinteger(r->lua_ctx.L, (int) http_code);
-            lua_pushstring(r->lua_ctx.L, curl_easy_strerror(curl_code));
-            lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx);
-            lua_pcall(r->lua_ctx.L, 4, 0 ,0);
-        }
-
-        free_request(l, r);
+        r->response.curl_code = (int) curl_code;
+        r->response.http_code = (int) http_code;
+        r->response.errmsg = curl_easy_strerror(curl_code);
+        ipc_cond_signal(r->cond);
     } /* while */
 }
 
@@ -341,50 +323,62 @@ size_t
 read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 {
     say_info("size = %zu, nmemb = %zu", size, nmemb);
-
+    
     request_t    *r         = (request_t *) ctx;
     const size_t total_size = size * nmemb;
-
-    if (r->lua_ctx.read_fn == LUA_REFNIL)
+    if (!r->body) {
         return total_size;
+    }
+    
+    size_t to_send = total_size;
+    if (r->sent + total_size > r->read)
+        to_send = r->read - r->sent;
+    memcpy(ptr, r->body + r->sent, to_send);
+    r->sent += to_send;
 
-    lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.read_fn);
-    lua_pushnumber(r->lua_ctx.L, total_size);
-    lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx);
-    lua_pcall(r->lua_ctx.L, 2, 1, 0);
-
-    size_t readen;
-    const char *data = lua_tolstring(r->lua_ctx.L,
-                                     lua_gettop(r->lua_ctx.L), &readen);
-    memcpy(ptr, data, readen);
-    lua_pop(r->lua_ctx.L, 1);
-
-    return readen;
+    return to_send;
 }
-
 
 static
 size_t
-write_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
+push_to_dyn_buffer(data_buf_t* bufp, char *data, size_t size) 
+{
+    if (bufp->written + size + 1 > bufp->allocated) {
+        /*TODO: may be better strategy of allocating */
+        bufp->allocated += 3 * size;
+        char *tmp = (char*) malloc(sizeof(char) * bufp->allocated);
+        
+        if (!tmp) {
+            say(S_ERROR, "in %s:%d \
+                can't allocate memory for dynamic buffer\n", 
+                __FILE__, __LINE__);
+            /* We just won't write anything to buffer. Only log about error.
+             * But not hang with done_cb in case we return sth not equeal to size*/
+            return size; 
+        }
+        memcpy(tmp, bufp->data, bufp->written);// may be written + 1 in sake of the last 0-byte
+        free(bufp->data);
+        bufp->data = tmp;
+    }
+    assert(bufp->data);
+    memcpy(bufp->data + bufp->written, data, size);
+    bufp->written += size;
+    bufp->data[bufp->written] = 0;
+    return size;
+}
+
+static
+size_t
+write_cb(char *ptr, size_t size, size_t nmemb, void *ctx)
 {
     say_info("size = %zu, nmemb = %zu", size, nmemb);
 
     request_t    *r    = (request_t *) ctx;
     const size_t bytes = size * nmemb;
 
-    if (r->lua_ctx.write_fn == LUA_REFNIL)
-        return bytes;
-
-    lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.write_fn);
-    lua_pushlstring(r->lua_ctx.L, (const char *) ptr, bytes);
-    lua_rawgeti(r->lua_ctx.L, LUA_REGISTRYINDEX, r->lua_ctx.fn_ctx);
-    lua_pcall(r->lua_ctx.L, 2, 1, 0);
-    const size_t written = lua_tointeger(r->lua_ctx.L,
-                                         lua_gettop(r->lua_ctx.L));
-    lua_pop(r->lua_ctx.L, 1);
-
-    return written;
+    return push_to_dyn_buffer(&r->response.body_buf, ptr, bytes);
 }
+
 
 static
 size_t
@@ -393,20 +387,7 @@ header_cb(char *buffer, size_t size, size_t nitems, void *ctx)
     say_info("size = %zu, mitems = %zu", size, nitems);
     request_t *r = (request_t*) ctx;
     const size_t bytes = size * nitems;
-    /* one more byte in condition for zero byte at the end of read chunk */
-    if (r->headers_buf.written + bytes + 1 > r->headers_buf.allocated) {
-        say(S_ERROR, "in %s:%d \
-                not enough alocated memory in data buffer.\
-                consider increasing \"buffer_size\" in http-client initialization.\n", 
-                __FILE__, __LINE__);
-        /*we just won't write anything to buffer. Only log about error. But not hang with done_cb*/
-        return bytes;
-    }
-    assert(r->headers_buf.data);
-    memcpy(r->headers_buf.data + r->headers_buf.written, buffer, bytes);
-    r->headers_buf.written += bytes;
-    r->headers_buf.data[r->headers_buf.written] = 0;
-    return bytes;
+    return push_to_dyn_buffer(&r->response.headers_buf, buffer, bytes);
 }
 
 CURLMcode

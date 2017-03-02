@@ -61,26 +61,6 @@ local http = function(opts)
 end
 
 
--- Internal {{{
-local function read_cb(cnt, ctx)
-    local res = ctx.body:sub(1, cnt)
-    ctx.body = ctx.body:sub(cnt + 1)
-    return res
-end
-
-local function write_cb(data, ctx)
-    ctx.response = ctx.response .. data
-    return data:len()
-end
-
-
-local function done_cb(curl_code, http_code, error_message, ctx)
-    ctx.done          = true
-    ctx.http_code     = http_code
-    ctx.curl_code     = curl_code
-    ctx.error_message = error_message
-end
-
 --
 --  <sync_request> This function does HTTP request
 --
@@ -116,13 +96,6 @@ local function sync_request(self, method, url, body, opts)
 
     opts = opts or {}
 
-    local ctx = {done          = false,
-                 http_code     = 0,
-                 curl_code     = 0,
-                 error_message = '',
-                 response      = '',
-                 body          = body or '', }
-
     local headers = opts.headers or {}
 
     -- I have to set CL since CURL-engine works async
@@ -130,14 +103,11 @@ local function sync_request(self, method, url, body, opts)
         headers['Content-Length'] = body:len()
     end
 
-    local ok, emsg = self.curl:async_request(method, url,
+    local ok, response = self.curl:async_request(method, url,
                                   {ca_path            = opts.ca_path,
                                    ca_file            = opts.ca_file,
                                    headers            = headers,
-                                   read               = read_cb,
-                                   write              = write_cb,
-                                   done               = done_cb,
-                                   ctx                = ctx,
+                                   body               = body or '',
                                    max_conns          = opts.max_conns,
                                    keepalive_idle     = opts.keepalive_idle,
                                    keepalive_interval = opts.keepalive_interval,
@@ -148,33 +118,13 @@ local function sync_request(self, method, url, body, opts)
                                    dns_cache_timeout  = opts.dns_cache_timeout,
                                    curl_verbose       = opts.curl_verbose, } )
 
-    -- Curl can't add a new request
-    if not ok then
-        error("curl has an internal error, msg = " .. emsg)
-    end
-
-    -- 'yield' until all data have arrived {{{
-    local max_ticks = opts.read_timeout or 60 * 100 -- 60 sec
-    local ticks = 0
-
-    while not ctx.done do
-        if ticks > max_ticks then
-          error("curl has an internal error, msg = read_timeout reached")
-        end
-
-        fiber.sleep(0.01)
-
-        ticks = ticks + 1
-    end
-    -- }}}
-
     -- Curl has an internal error
-    if ctx.curl_code ~= 0 then
-        error("curl has an internal error, msg = " .. ctx.error_message)
+    if not ok then
+        error("curl has an internal error,code = " .. response.curl_code" msg = " .. response.error_message)
     end
 
-    -- Curl did a request and he has a response
-    return { code = ctx.http_code, body = ctx.response, headers = ctx.response_headers}
+    -- Curl did a request and it has a response
+    return { code = response.http_code, body = response.body, headers = response.headers}
 end
 -- }}}
 
@@ -244,123 +194,6 @@ curl_mt = {
     --
     http_connect = function(self, url, options)
         return self:request('CONNECT', url, '', options)
-    end,
-    --  <async_request> This function does HTTP request
-    --
-    --  Parameters:
-    --
-    --    method  - HTTP method, like GET, POST, PUT and so on
-    --    url     - HTTP url, like https://tarantool.org/doc
-    --    options - this is a table of options.
-    --
-    --      done - name of a callback function which is invoked when a request
-    --             was completed;
-    --
-    --      write - name of a callback function which is invoked if the
-    --              server returns data to the client;
-    --              signature is function(data, context)
-    --
-    --      read - name of a callback function which is invoked if the
-    --             client passes data to the server.
-    --             signature is function(content_size, context)
-    --
-    --      done - name of a callback function which is invoked when a request
-    --             was completed;
-    --             signature is  function(curl_code, http_code, error_message, ctx)
-    --
-    --      ca_path - a path to ssl certificate dir;
-    --
-    --      ca_file - a path to ssl certificate file;
-    --
-    --      headers - a table of HTTP headers;
-    --
-    --      max_conns - max amount of cached alive connections;
-    --
-    --      keepalive_idle & keepalive_interval - non-universal keepalive knobs (Linux, AIX, HP-UX, more);
-    --
-    --      low_speed_time & low_speed_limit - If the download receives less than "low speed limit" bytes/second
-    --                                         during "low speed time" seconds, the operations is aborted.
-    --                                         You could i.e if you have a pretty high speed connection, abort if
-    --                                         it is less than 2000 bytes/sec during 20 seconds;
-    --
-    --      read_timeout - Time-out the read operation after this amount of seconds;
-    --
-    --      connect_timeout  - Time-out connect operations after this amount of seconds, if connects are;
-    --                         OK within this time, then fine... This only aborts the connect phase;
-    --
-    --      dns_cache_timeout - DNS cache timeout;
-    --
-    --      curl_verbose - make libcurl verbose!;
-    --
-    --  Returns:
-    --     ok, msg or error()
-    --
-    async_request = function(self, method, url, options)
-        if not method or not url or not options then
-            error('signature (method, url [, body [, options]])')
-        end
-        if type(options.read) ~= 'function' or
-           type(options.write) ~= 'function' or
-           type(options.done) ~= 'function'
-        then
-            error('options should have read write and done functions')
-        end
-        return self.curl:async_request(method, url, options)
-    end,
-
-    --
-    -- <async_get> - see <async_request>
-    --
-    async_get = function(self, url, options)
-        return self:async_request('GET', url, options)
-    end,
-
-    --
-    -- <async_post> - see <async_request>
-    --
-    async_post = function(self, url, options)
-        return self:async_request('POST', url, options)
-    end,
-
-    --
-    -- <async_put> - see <async_request>
-    --
-    async_put = function(self, url, options)
-        return self:async_request('PUT', url, options)
-    end,
-
-    --
-    -- <async_http_options> see <async_request>
-    --
-    async_http_options = function(self, url, options)
-        return self:async_request('OPTIONS', url, options)
-    end,
-
-    --
-    -- <async_head> see <async_request>
-    --
-    async_head = function(self, url, options)
-        return self:async_request('HEAD', url, options)
-    end,
-    --
-    -- <async_delete> see <async_request>
-    --
-    async_delete = function(self, url, options)
-        return self:request('DELETE', url, options)
-    end,
-
-    --
-    -- <async_trace> see <async_request>
-    --
-    async_trace = function(self, url, options)
-        return self:async_request('TRACE', url, options)
-    end,
-
-    --
-    -- <async_http_connect> see <async_request>
-    --
-    async_http_connect = function(self, url, options)
-        return self:async_request('CONNECT', url, options)
     end,
 
     --

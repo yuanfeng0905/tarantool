@@ -60,16 +60,46 @@ ctx_get(lua_State *L)
 
 static inline
 int
-curl_make_result(lua_State *L, CURLcode code, CURLMcode mcode)
+curl_make_result(lua_State *L, CURLcode code, CURLMcode mcode, request_t *r)
 {
   const char *emsg = NULL;
   if (code != CURL_LAST)
     emsg = curl_easy_strerror(code);
   else if (mcode != CURLM_LAST)
     emsg = curl_multi_strerror(mcode);
-  return make_str_result(L,
-        code != CURLE_OK,
-        (emsg != NULL ? emsg : "ok"));
+
+  lua_pushboolean(L, code != CURLE_OK);
+
+  lua_newtable(L);
+
+  lua_pushstring(L, "curl_code");
+  lua_pushinteger(L, r->response.curl_code);
+  lua_settable(L, -3);   
+  lua_pushstring(L, "http_code");
+  lua_pushinteger(L, r->response.http_code);
+  lua_settable(L, -3);
+
+  if (!emsg) {
+    emsg = (r->response.errmsg != NULL) ? r->response.errmsg:"ok";   
+  }
+
+  lua_pushstring(L, "error_message");
+  lua_pushstring(L, emsg);
+  lua_settable(L, -3);
+
+  if (r->response.headers_buf.data) {
+      lua_pushstring(L, "headers");
+      lua_pushstring(L, r->response.headers_buf.data);
+      lua_settable(L, -3);
+  }
+
+  if (r->response.body_buf.data) {
+      lua_pushstring(L, "body");
+      lua_pushstring(L, r->response.body_buf.data);
+      lua_settable(L, -3);
+  }
+
+  return 2;
 }
 
 static inline
@@ -88,5 +118,23 @@ add_field_u64(lua_State *L, const char *key, uint64_t value)
  */
 LUALIB_API int
 luaopen_curl_driver(lua_State *L);
+
+
+typedef struct {
+    char* body;
+
+} options;
+
+typedef struct {
+
+} response_t;
+
+int curl_version();
+
+lib_ctx_t *curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size);
+
+void curl_free(lib_ctx_t *ctx);
+
+response_t *request(lib_ctx_t *ctx, const char* method, const char* url, const options_t* options);
 
 #endif /* DRIVER_H_INCLUDED */

@@ -41,6 +41,7 @@
 #include <lauxlib.h>
 
 #include <curl/curl.h>
+#include <ipc.h>
 
 struct curl_ctx_s;
 
@@ -64,20 +65,25 @@ typedef struct {
   /* Reference to curl context */
   struct curl_ctx_s *curl_ctx;
 
-  /* Callbacks from lua and Lua context */
-  struct {
-    lua_State *L;
-    int       read_fn;
-    int       write_fn;
-    int       done_fn;
-    int       fn_ctx;
-  } lua_ctx;
-
   /* HTTP headers */
   struct curl_slist *headers;
 
-  /* Buffer for headers read */
+  struct {
+  /* Buffer for headers and response  */
   data_buf_t headers_buf;
+  data_buf_t body_buf;
+
+  int curl_code;
+  int http_code;
+  const char *errmsg;
+  } response;
+  /* body to send to server and its length*/
+
+  char *body;
+  size_t read;
+  size_t sent;
+
+  struct ipc_cond *cond;
 } request_t;
 
 typedef struct {
