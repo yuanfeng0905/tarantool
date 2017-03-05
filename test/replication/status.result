@@ -30,11 +30,11 @@ r.status == "follow"
 ---
 - true
 ...
-r.lag < 1
+r.applier.lag < 1
 ---
 - true
 ...
-r.idle < 1
+r.applier.idle < 1
 ---
 - true
 ...
@@ -61,11 +61,11 @@ test_run:cmd('switch replica')
 r = box.info.replication[1]
 ---
 ...
-r.status == "stopped"
+r.applier.status == "stopped"
 ---
 - true
 ...
-r.message:match('Duplicate') ~= nil
+r.applier.message:match('Duplicate') ~= nil
 ---
 - true
 ...

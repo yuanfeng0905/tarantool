@@ -41,6 +41,8 @@
 #include <lualib.h>
 
 #include "box/applier.h"
+#include "box/relay.h"
+#include "box/recovery.h"
 #include "box/wal.h"
 #include "box/replication.h"
 #include "main.h"
@@ -65,16 +67,9 @@ lbox_pushvclock(struct lua_State *L, struct vclock *vclock)
 }
 
 static void
-lbox_pushreplica(lua_State *L, struct replica *replica)
+lbox_pushapplier(lua_State *L, struct applier *applier)
 {
-	struct applier *applier = replica->applier;
-
-	lua_createtable(L, 0, 4);
-
-	lua_pushstring(L, "uuid");
-	lua_pushstring(L, tt_uuid_str(&replica->uuid));
-	lua_settable(L, -3);
-
+	lua_newtable(L);
 	/* Get applier state in lower case */
 	static char status[16];
 	char *d = status;
@@ -104,6 +99,52 @@ lbox_pushreplica(lua_State *L, struct replica *replica)
 	}
 }
 
+static void
+lbox_pushrelay(lua_State *L, struct relay *relay)
+{
+	lua_newtable(L);
+	lua_pushstring(L, "vclock");
+	lbox_pushvclock(L, &relay->vclock);
+	lua_settable(L, -3);
+}
+
+static void
+lbox_pushreplica(lua_State *L, struct replica *replica)
+{
+	struct applier *applier = replica->applier;
+	struct relay *relay = replica->relay;
+
+	lua_newtable(L);
+
+	lua_pushstring(L, "uuid");
+	lua_pushstring(L, tt_uuid_str(&replica->uuid));
+	lua_settable(L, -3);
+
+	lua_pushstring(L, "status");
+	if (applier != NULL && relay != NULL) {
+		lua_pushstring(L, "bidirectional");
+	}
+	else if (applier != NULL) {
+		lua_pushstring(L, "follow");
+	}
+	else {
+		lua_pushstring(L, "relay");
+	}
+	lua_settable(L, -3);
+
+	if (applier != NULL) {
+		lua_pushstring(L, "applier");
+		lbox_pushapplier(L, applier);
+		lua_settable(L, -3);
+	}
+
+	if (relay != NULL) {
+		lua_pushstring(L, "upstream");
+		lbox_pushrelay(L, relay);
+		lua_settable(L, -3);
+	}
+}
+
 static int
 lbox_info_replication(struct lua_State *L)
 {
@@ -117,7 +158,8 @@ lbox_info_replication(struct lua_State *L)
 
 	replicaset_foreach(replica) {
 		/* Applier hasn't received replica id yet */
-		if (replica->id == REPLICA_ID_NIL || replica->applier == NULL)
+		if (replica->id == REPLICA_ID_NIL ||
+		    (replica->applier == NULL && replica->relay == NULL))
 			continue;
 
 		lbox_pushreplica(L, replica);
