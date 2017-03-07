@@ -54,7 +54,7 @@
 #include "lua/pickle.h"
 #include "lua/fio.h"
 #include <small/ibuf.h>
-#include "lua/curl_driver.h"
+#include "lua/curl.h"
 
 #include <readline/readline.h>
 #include <readline/history.h>

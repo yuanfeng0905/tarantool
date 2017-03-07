@@ -1,3 +1,4 @@
+#!/usr/bin/env nodejs
 /*
  * Copyright (C) 2016 - 2017 Tarantool AUTHORS: please see AUTHORS file.
  *
@@ -28,74 +29,30 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
-#ifndef REQUEST_POOL_H_INCLUDED
-#define REQUEST_POOL_H_INCLUDED 1
-
-#include <stdlib.h>
-#include <stdbool.h>
-#include <inttypes.h>
-
-#include <lua.h>
-#include <lualib.h>
-#include <lauxlib.h>
-
-#include <curl/curl.h>
-#include <ipc.h>
-
-struct curl_ctx_s;
-
-typedef struct {
-    char* data;
-    size_t written;
-    size_t allocated;
-} data_buf_t;
-
-typedef struct {
-
-  /* pool meta info */
-  struct {
-    size_t idx;
-    bool   busy;
-  } pool;
-
-  /** Information associated with a specific easy handle */
-  CURL       *easy;
-
-  /* Reference to curl context */
-  struct curl_ctx_s *curl_ctx;
-
-  /* HTTP headers */
-  struct curl_slist *headers;
-
-  struct {
-  /* Buffer for headers and response  */
-  data_buf_t headers_buf;
-  data_buf_t body_buf;
-
-  int curl_code;
-  int http_code;
-  const char *errmsg;
-  } response;
-  /* body to send to server and its length*/
-
-  char *body;
-  size_t read;
-  size_t sent;
-
-  struct ipc_cond *cond;
-} request_t;
-
-typedef struct {
-  request_t  *mem;
-  size_t     size;
-} request_pool_t;
-
-bool request_pool_new(request_pool_t *p, struct curl_ctx_s *c, size_t s, size_t buffer_size);
-void request_pool_free(request_pool_t *p);
-
-request_t* request_pool_get_request(request_pool_t *p);
-void request_pool_free_request(request_pool_t *p, request_t *c);
-size_t request_pool_get_free_size(request_pool_t *p);
-
-#endif /* REQUEST_POOL_H_INCLUDED */
+http = require('http')
+http.createServer(function (req, res) {
+    setTimeout(function () {
+        res.writeHead(200, {'Content-Type': 'text/plain'});
+        res.end("Hello World");
+    }, 1 )
+    }).on('request', function(request, response){
+        if (request.method == "TRACE"){
+            response.writeHead(200, {'Content-Type': 'text/plain'});
+            response.end("");
+        }
+    }
+    ).on('connection', function (socket) {
+    socket.setTimeout(10000*2);
+    }).on('connect', (req, cltSocket, head) => {
+            url = require('url')
+            net = require('net')
+            var srvSocket = net.connect(10000, "127.0.0.1", () => {
+            cltSocket.write('HTTP/1.1 200 Connection Established\r\n' +
+                            'Proxy-agent: Node.js-Proxy\r\n' +
+                            '\r\n');
+                      srvSocket.write(head);
+                      srvSocket.end()
+                      cltSocket.end()    
+                      });
+    }
+    ).listen(10000);

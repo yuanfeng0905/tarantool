@@ -1,0 +1,277 @@
+/*
+ * Copyright (C) 2016 - 2017 Tarantool AUTHORS: please see AUTHORS file.
+ *
+ * Redistribution and use in source and binary forms, with or
+ * without modification, are permitted provided that the following
+ * conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above
+ *    copyright notice, this list of conditions and the
+ *    following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above
+ *    copyright notice, this list of conditions and the following
+ *    disclaimer in the documentation and/or other materials
+ *    provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY <COPYRIGHT HOLDER> ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+ * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
+ * <COPYRIGHT HOLDER> OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+ * INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR
+ * BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+ * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
+ * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+
+#ifndef DRIVER_H_INCLUDED
+#define DRIVER_H_INCLUDED 1
+
+#include "say.h"
+#include "curl/curl.h"
+#include "src/fiber.h"
+/**
+ * Unique name for userdata metatables
+ */
+
+struct curl_args_t {
+  /* Set to true to enable pipelining for this multi handle */
+  bool pipeline;
+
+  /* Maximum number of entries in the Connection cache */
+  long max_conns;
+
+  size_t pool_size;
+
+  /* Size of buffers on reading */
+  size_t buffer_size;
+};
+
+
+struct header {
+    const char* key;
+    const char* value;
+};
+
+struct request_start_args_t{
+
+  /* Max amount of cached alive Connections */
+  long max_conns;
+
+  /* Non-universal keepalive knobs (Linux, AIX, HP-UX, more) */
+  long keepalive_idle;
+  long keepalive_interval;
+
+  /* Set the "low speed limit & time"
+     If the download receives less than "low speed limit" bytes/second during
+     "low speed time" seconds, the operations is aborted. You could i.e if you
+     have a pretty high speed Connection, abort if it is less than 2000
+     bytes/sec during 20 seconds;
+   */
+  long low_speed_time;
+  long low_speed_limit;
+
+  /* Time-out the read operation after this amount of seconds */
+  long read_timeout;
+
+  /* Time-out connects operations after this amount of seconds, if connects are
+     OK within this time, then fine... This only aborts the Connect phase. */
+  long connect_timeout;
+
+  /* DNS cache timeout */
+  long dns_cache_timeout;
+
+  /* Enable/Disable curl verbose mode */
+  bool curl_verbose;
+
+  /**/
+  const char* ca_path;
+
+  const char* ca_file;
+
+  const char* body;
+
+  struct header* headers;
+};
+
+static inline
+void
+request_start_args_init(struct request_start_args_t *a)
+{
+  assert(a);
+  a->max_conns = -1;
+  a->keepalive_idle = -1;
+  a->keepalive_interval = -1;
+  a->low_speed_time = -1;
+  a->low_speed_limit = -1;
+  a->read_timeout = -1;
+  a->connect_timeout = -1;
+  a->dns_cache_timeout = -1;
+  a->curl_verbose = false;
+  a->ca_path = NULL;
+  a->ca_file = NULL;
+  a->body = NULL;
+  a->headers = NULL;
+}
+
+/* request pool API
+ * used for stat info
+ */
+
+struct request_pool_t{
+  struct request_t  *mem;
+  size_t     size;
+};
+
+
+size_t
+request_pool_get_free_size(struct request_pool_t *p);
+
+void
+request_pool_free_request(struct request_pool_t *p, struct request_t *c);
+
+/*
+ * }}}   
+ */
+#
+/* Curl context API
+ * {{{ 
+ */ 
+struct curl_ctx_t {
+
+  struct ev_loop  *loop;
+  struct ev_timer timer_event;
+
+  struct request_pool_t     cpool;
+
+  CURLM           *multi;
+  int             still_running;
+
+  /* Various values of statistics, they are used only for all
+   * Connection in curl context */
+  struct {
+    uint64_t      total_requests;
+    uint64_t      http_200_responses;
+    uint64_t      http_other_responses;
+    size_t        failed_requests;
+    size_t        active_requests;
+    size_t        sockets_added;
+    size_t        sockets_deleted;
+  } stat;
+};
+
+struct lib_ctx_t{
+    struct curl_ctx_t   *curl_ctx;
+    bool         done;
+};
+
+struct lib_ctx_t*
+curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size);
+
+struct curl_ctx_t*
+curl_ctx_new(const struct curl_args_t *a);
+
+void
+curl_destroy(struct curl_ctx_t *l);
+
+void
+curl_delete(struct lib_ctx_t *ctx);
+
+/* }}}
+ */
+
+/*
+ * Request API
+ * {{{
+ */
+
+struct data_buf_t {
+    char* data;
+    size_t written;
+    size_t allocated;
+};
+
+struct request_t {
+
+  /* pool meta info */
+  struct {
+    size_t idx;
+    bool   busy;
+  } pool;
+
+  /** Information associated with a specific easy handle */
+  CURL       *easy;
+
+  /* Reference to curl context */
+  struct curl_ctx_t *curl_ctx;
+
+  /* HTTP headers */
+  struct curl_slist *headers;
+
+  struct {
+  /* Buffer for headers and response  */
+  struct data_buf_t headers_buf;
+  struct data_buf_t body_buf;
+
+  int curl_code;
+  int http_code;
+  const char *errmsg;
+  } response;
+  /* body to send to server and its length*/
+
+  const char *body;
+  size_t read;
+  size_t sent;
+
+  struct ipc_cond *cond;
+};
+
+struct request_t*
+http_request(struct lib_ctx_t *ctx, const char* method, const char* url, const struct request_start_args_t* args);
+
+static inline
+char*
+get_headers(struct request_t* r)
+{
+    return r->response.headers_buf.data;
+}
+
+static inline
+char*
+get_body(struct request_t* r)
+{
+    return r->response.body_buf.data;
+}
+
+static inline
+int
+get_http_code(struct request_t* r)
+{
+    return r->response.http_code;
+}
+
+static inline
+bool
+request_add_header(struct request_t *c, const char *http_header)
+{
+  assert(c);
+  assert(http_header);
+  struct curl_slist *l = curl_slist_append(c->headers, http_header);
+  if (l == NULL)
+    return false;
+  c->headers = l;
+  return true;
+}
+
+void
+free_request(struct lib_ctx_t* ctx, struct request_t *r);
+/*
+ * }}}
+ */
+
+#endif /* DRIVER_H_INCLUDED */

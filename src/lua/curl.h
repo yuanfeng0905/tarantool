@@ -28,47 +28,13 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-
-#ifndef DRIVER_UTILS_H_INCLUDED
-#define DRIVER_UTILS_H_INCLUDED 1
-
-#include <errno.h>
-#include <string.h>
-#include <stdlib.h>
-
-//#include <tarantool/module.h>
+#ifndef CURL_LUA_H_INCLUDED
+#define CURL_LUA_H_INCLUDED 1
 
 
-#ifndef TIMEOUT_INFINITY
-#  define TIMEOUT_INFINITY ((size_t)-1)
-#endif /*TIMEOUT_INFINITY*/
+#include <lua.h>
+#include <lualib.h>
+#include <lauxlib.h>
 
-
-static inline
-int
-make_str_result(lua_State *L, bool ok, const char *str)
-{
-	lua_pushboolean(L, ok);
-	lua_pushstring(L, str);
-	return 2;
-}
-
-static inline
-int
-make_int_result(lua_State *L, bool ok, int i)
-{
-	lua_pushboolean(L, ok);
-	lua_pushinteger(L, i);
-	return 2;
-}
-
-static inline
-int
-make_errorno_result(lua_State *L, int the_errno)
-{
-	lua_pushboolean(L, false);
-	lua_pushstring(L, strerror(the_errno));
-	return 2;
-}
-
-#endif /* DRIVER_UTILS_H_INCLUDED */
+LUA_API int luaopen_curl_driver(lua_State *L);
+#endif /* CURL_LUA_H_INCLUDED */

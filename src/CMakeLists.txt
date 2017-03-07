@@ -125,6 +125,7 @@ set (server_sources
      proc_title.c
      coeio_file.c
      clock.c
+     curl.c
      lua/digest.c
      lua/init.c
      lua/fiber.c
@@ -137,9 +138,7 @@ set (server_sources
      lua/pickle.c
      lua/fio.c
      lua/crypto.c
-     lua/curl_driver.c
-     lua/curl_request_pool.c
-     lua/curl_wrapper.c
+     lua/curl.c
      ${lua_sources}
      ${PROJECT_SOURCE_DIR}/third_party/lua-yaml/lyaml.cc
      ${PROJECT_SOURCE_DIR}/third_party/lua-yaml/b64.c
@@ -165,6 +164,7 @@ set(api_headers
     ${CMAKE_SOURCE_DIR}/src/box/lua/call.h
     ${CMAKE_SOURCE_DIR}/src/latch.h
     ${CMAKE_SOURCE_DIR}/src/clock.h
+    ${CMAKE_SOURCE_DIR}/src/curl.h
 )
 rebuild_module_api(${api_headers})
 

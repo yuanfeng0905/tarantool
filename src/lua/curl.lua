@@ -96,17 +96,11 @@ local function sync_request(self, method, url, body, opts)
 
     opts = opts or {}
 
-    local headers = opts.headers or {}
 
-    -- I have to set CL since CURL-engine works async
-    if body then
-        headers['Content-Length'] = body:len()
-    end
-
-    local ok, response = self.curl:async_request(method, url,
+    local response = self.curl:async_request(method, url,
                                   {ca_path            = opts.ca_path,
                                    ca_file            = opts.ca_file,
-                                   headers            = headers,
+                                   headers            = opts.headers,
                                    body               = body or '',
                                    max_conns          = opts.max_conns,
                                    keepalive_idle     = opts.keepalive_idle,
@@ -119,8 +113,8 @@ local function sync_request(self, method, url, body, opts)
                                    curl_verbose       = opts.curl_verbose, } )
 
     -- Curl has an internal error
-    if not ok then
-        error("curl has an internal error,code = " .. response.curl_code" msg = " .. response.error_message)
+    if response.curl_code ~= 0 then
+        error("curl has an internal error,code = " .. response.curl_code .. " msg = " .. response.error_message)
     end
 
     -- Curl did a request and it has a response
