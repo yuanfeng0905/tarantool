@@ -32,6 +32,9 @@
 #ifndef CURL_LUA_C_INCLUDED
 #define CURL_LUA_C_INCLUDED 1
 
+/**
+ * Unique name for userdata metatables
+ */
 #define DRIVER_LUA_UDATA_NAME	"__tnt_curl"
 #define TNT_CURL_VERSION_MAJOR 2
 #define TNT_CURL_VERSION_MINOR 2
@@ -69,7 +72,7 @@ add_field_u64(lua_State *L, const char *key, uint64_t value)
 
 static
 int
-async_request(lua_State *L)
+luaT_curl_request(lua_State *L)
 {
     const char *reason = "unknown error";
     struct lib_ctx_t *ctx = ctx_get(L);
@@ -109,20 +112,24 @@ async_request(lua_State *L)
                 lua_pop(L, 1);
             }
 
-            hh = (struct header*) malloc(sizeof(struct header) * (size_hh + 1));
-            if (!hh) {
-                reason = "Can't allocate memory for headers passed from Lua";
-                goto error_exit;
-            }
+            if (size_hh > 0) {
+                hh = (struct header*)
+			malloc(sizeof(struct header) * (size_hh + 1));
+                if (!hh) {
+                    reason = "Can't allocate memory for headers\
+			      passed from Lua";
+                    goto error_exit;
+                }
 
-            size_t i = 0;
-            lua_pushnil(L);
-            while (lua_next(L, -2) != 0) {
-                hh[i].key = lua_tostring(L, -2);
-                hh[i++].value = lua_tostring(L, -1);
-                lua_pop(L, 1);
-            } // while
-            hh[i].key = NULL;
+                size_t i = 0;
+                lua_pushnil(L);
+                while (lua_next(L, -2) != 0) {
+                    hh[i].key = lua_tostring(L, -2);
+                    hh[i++].value = lua_tostring(L, -1);
+                    lua_pop(L, 1);
+                } // while
+                hh[i].key = NULL;
+            }
         }
         lua_pop(L, 1);
         req_args.headers = hh;
@@ -196,18 +203,14 @@ async_request(lua_State *L)
             req_args.curl_verbose = true;
         lua_pop(L, 1);
     } else {
-        reason = "4-arg have to be a table";
+        reason = "fourth argument have to be a table";
         goto error_exit;
     }
     /* }}} */
-    
 
-    /* Note that the add_handle() will set a
-     * time-out to trigger very soon so that
-     * the necessary socket_action() call will be
-     * called by this app */
+
     struct request_t* r = http_request(ctx, method, url, &req_args);
- 
+
     if (hh)
         free(hh);
 
@@ -215,6 +218,7 @@ async_request(lua_State *L)
         reason = "Error in request";
         goto error_exit;
     }
+
     int res = curl_make_result(L, r);
     free_request(ctx, r);
     return  res;
@@ -248,7 +252,7 @@ get_stat(lua_State *L)
     return 1;
 }
 
-static 
+static
 int
 curl_make_result(lua_State *L, struct request_t *r)
 {
@@ -256,7 +260,7 @@ curl_make_result(lua_State *L, struct request_t *r)
 
   lua_pushstring(L, "curl_code");
   lua_pushinteger(L, r->response.curl_code);
-  lua_settable(L, -3);   
+  lua_settable(L, -3);
 
   lua_pushstring(L, "http_code");
   lua_pushinteger(L, r->response.http_code);
@@ -384,7 +388,6 @@ new(lua_State *L)
     if (ctx->curl_ctx == NULL)
         return luaL_error(L, "curl_new failed");
 
-
     luaL_getmetatable(L, DRIVER_LUA_UDATA_NAME);
     lua_setmetatable(L, -2);
 
@@ -421,7 +424,7 @@ static const struct luaL_Reg R[] = {
 };
 
 static const struct luaL_Reg M[] = {
-    {"async_request", async_request},
+    {"luaT_curl_request", luaT_curl_request},
     {"stat",          get_stat},
     {"pool_stat",     pool_stat},
     {"free",          cleanup},
