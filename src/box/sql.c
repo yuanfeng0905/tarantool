@@ -711,20 +711,24 @@ static const struct Enc *get_enc(void *buf)
  * Convert SQLite affinity value to the corresponding Tarantool type
  * string which is suitable for _index.parts field.
  */
-static const char *convertSqliteAffinity(int affinity)
+static const char *convertSqliteAffinity(int affinity, bool allow_nulls)
 {
-	switch (affinity) {
-	default:
-		assert(false);
-	case SQLITE_AFF_BLOB:
+	if (allow_nulls) {
 		return "scalar";
-	case SQLITE_AFF_TEXT:
-		return "string";
-	case SQLITE_AFF_NUMERIC:
-	case SQLITE_AFF_REAL:
-		return "number";
-	case SQLITE_AFF_INTEGER:
-		return "integer";
+	} else {
+		switch (affinity) {
+		default:
+			assert(false);
+		case SQLITE_AFF_BLOB:
+			return "scalar";
+		case SQLITE_AFF_TEXT:
+			return "string";
+		case SQLITE_AFF_NUMERIC:
+		case SQLITE_AFF_REAL:
+			return "number";
+		case SQLITE_AFF_INTEGER:
+			return "integer";
+		}
 	}
 }
 
@@ -749,7 +753,7 @@ int tarantoolSqlite3MakeTableFormat(Table *pTable, void *buf)
 		p = enc->encode_str(p, aCol[i].zName, strlen(aCol[i].zName));
 		p = enc->encode_str(p, "type", 4);
 		t = aCol[i].affinity == SQLITE_AFF_BLOB ? "*" :
-			convertSqliteAffinity(aCol[i].affinity);
+			convertSqliteAffinity(aCol[i].affinity, aCol[i].notNull == 0);
 		p = enc->encode_str(p, t, strlen(t));
 	}
 	return (int)(p - base);
@@ -789,7 +793,7 @@ int tarantoolSqlite3MakeIdxParts(SqliteIndex *pIndex, void *buf)
 	p = enc->encode_array(base, n);
 	for (i=0; i<n; i++) {
 		int col = pIndex->aiColumn[i];
-		const char *t = convertSqliteAffinity(aCol[col].affinity);
+		const char *t = convertSqliteAffinity(aCol[col].affinity, aCol[col].notNull == 0);
 		p = enc->encode_array(p, 2),
 		p = enc->encode_uint(p, col);
 		p = enc->encode_str(p, t, strlen(t));
@@ -811,9 +815,19 @@ int tarantoolSqlite3MakeIdxOpts(SqliteIndex *index, const char *zSql, void *buf)
 {
 	const struct Enc *enc = get_enc(buf);
 	char *base = buf, *p;
+	bool unique = true;
+	
+	struct Column *aCol = index->pTable->aCol;
+	int i, n = index->nKeyCol;
+	for (i=0; i<n; i++) {
+		int col = index->aiColumn[i];
+		if (aCol[col].notNull == 0) {
+			unique = false;
+		}
+	}
 	p = enc->encode_map(base, 2);
 	p = enc->encode_str(p, "unique", 6);
-	p = enc->encode_bool(p, index->onError != OE_None);
+	p = enc->encode_bool(p, unique && (index->onError != OE_None));
 	p = enc->encode_str(p, "sql", 3);
 	p = enc->encode_str(p, zSql, zSql ? strlen(zSql) : 0);
 	return (int)(p - base);

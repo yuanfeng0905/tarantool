@@ -1412,10 +1412,17 @@ Bitmask sqlite3WhereCodeOneLoopStart(
     if( (pWInfo->wctrlFlags&WHERE_ORDERBY_MIN)!=0
      && pWInfo->nOBSat>0
      && (pIdx->nKeyCol>nEq)
+	
     ){
-      assert( pLoop->nSkip==0 );
-      bSeekPastNull = 1;
-      nExtraReg = 1;
+      j = pIdx->aiColumn[nEq];
+      /* Allow seek for column with `NOT NULL` == false attribute.
+         Otherwidse, we might end up with comparison of INTEGER and
+         NIL, which os prohibited by Tarantool.  */
+      if( (j>=0 && pIdx->pTable->aCol[j].notNull==0) || j==XN_EXPR ){
+	assert( pLoop->nSkip==0 );
+	bSeekPastNull = 1;
+	nExtraReg = 1;
+      }
     }
 
     /* Find any inequality constraint terms for the start and end 
