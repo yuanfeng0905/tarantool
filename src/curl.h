@@ -34,8 +34,8 @@
 
 #include "say.h"
 #include "curl/curl.h"
-#include "src/fiber.h"
-
+#include "fiber.h"
+#include "small/ibuf.h"
 /*
  * Structures {{{
 */
@@ -47,6 +47,8 @@ struct curl_args_t {
 	/* Maximum number of entries in the Connection cache */
 	long max_conns;
 
+	/* Size of pool of requests, number of request
+	 * can be performed simultaneously */
 	size_t pool_size;
 
 	/* Size of buffers on reading response */
@@ -96,19 +98,23 @@ struct request_start_args_t{
 	/* Enable/Disable curl verbose mode */
 	bool curl_verbose;
 
-	/**/
+	/* Path to directory holding one or more certificates
+	 * to verify the peer with*/
 	const char* ca_path;
 
+	/* File holding one or more certificates
+	 * to verify the peer with*/
 	const char* ca_file;
 
+	/* Body of request*/
 	const char* body;
-
+	/* Headers or request*/
 	struct header* headers;
 };
 
 struct request_pool_t{
-	struct request_t	*mem;
-	size_t	 size;
+	struct	request_t *mem;
+	size_t	size;
 };
 
 struct curl_ctx_t {
@@ -116,10 +122,10 @@ struct curl_ctx_t {
 	struct ev_loop	*loop;
 	struct ev_timer timer_event;
 
-	struct request_pool_t		cpool;
+	struct	request_pool_t cpool;
 
-	CURLM			*multi;
-	int				still_running;
+	CURLM	*multi;
+	int 	still_running;
 
 	/* Various values of statistics, they are used only for all
 	 * Connection in curl context */
@@ -139,11 +145,6 @@ struct lib_ctx_t{
 	bool done;
 };
 
-struct data_buf_t {
-	char* data;
-	size_t written;
-	size_t allocated;
-};
 
 struct request_t {
 
@@ -164,15 +165,15 @@ struct request_t {
 
 	struct {
 	/* Buffer for headers and response	*/
-	struct data_buf_t headers_buf;
-	struct data_buf_t body_buf;
+	struct ibuf headers_buf;
+	struct ibuf body_buf;
 
 	int curl_code;
 	int http_code;
 	const char *errmsg;
 	} response;
-	/* body to send to server and its length*/
 
+	/* body to send to server and its length*/
 	const char *body;
 	size_t read;
 	size_t sent;
@@ -279,14 +280,36 @@ static inline
 char*
 get_headers(struct request_t* r)
 {
-	return r->response.headers_buf.data;
+	if (ibuf_used(&r->response.headers_buf) <= 0)
+		return NULL;
+
+	char* p = (char*) ibuf_alloc(&r->response.headers_buf, 1);
+	if (!p) {
+		say(S_ERROR, "in %s:%d \
+				can't allocate memory for input buffer\n",
+				__FILE__, __LINE__);
+		return NULL;
+	}
+	*p = 0;
+	return r->response.headers_buf.buf;
 }
 
 static inline
 char*
 get_body(struct request_t* r)
 {
-	return r->response.body_buf.data;
+	if (ibuf_used(&r->response.body_buf) <= 0)
+		return NULL;
+
+	char* p = (char*) ibuf_alloc(&r->response.body_buf, 1);
+	if (!p) {
+		say(S_ERROR, "in %s:%d \
+				can't allocate memory for input buffer\n",
+				__FILE__, __LINE__);
+		return NULL;
+	}
+	*p = 0;
+	return r->response.body_buf.buf;
 }
 
 static inline
@@ -297,6 +320,13 @@ get_http_code(struct request_t* r)
 }
 
 static inline
+const char*
+get_errmsg(struct request_t* r)
+{
+	return r->response.errmsg;
+}
+
+static inline
 bool
 request_add_header(struct request_t *c, const char *http_header)
 {
@@ -304,7 +334,7 @@ request_add_header(struct request_t *c, const char *http_header)
 	assert(http_header);
 	struct curl_slist *l = curl_slist_append(c->headers, http_header);
 	if (l == NULL)
-	return false;
+		return false;
 	c->headers = l;
 	return true;
 }

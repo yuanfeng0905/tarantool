@@ -58,54 +58,57 @@ static
 struct request_t*
 request_pool_get_request(struct request_pool_t *p);
 
-
-
 static inline
 struct request_t*
 new_request(struct curl_ctx_t *ctx);
 
 static inline
 bool
-request_add_header_keepalive(struct request_t *c,
+request_add_header_keepalive(struct request_t *r,
 		const struct request_start_args_t *a)
 {
 	static char buf[255];
 
-	assert(c);
+	assert(r);
 	assert(a);
 
 	snprintf(buf, sizeof(buf) - 1, "Keep-Alive: timeout=%d",
 			 (int) a->keepalive_idle);
 
-	struct curl_slist *l = curl_slist_append(c->headers, buf);
-	if (l == NULL)
-	return false;
-
-	c->headers = l;
+	if (!request_add_header(r, buf))
+		return false;
 	return true;
 }
 
 static inline
 bool
-request_set_post(struct request_t *c)
+request_add_header_CL(struct request_t *r,
+		const struct request_start_args_t *a)
 {
-	assert(c);
-	assert(c->easy);
-	if (!request_add_header(c, "Accept: */*"))
-	return false;
-	curl_easy_setopt(c->easy, CURLOPT_POST, 1L);
+	assert(r);
+	assert(a);
+	char buf[20];
+	if (!a->body) {
+		snprintf(buf, sizeof(buf) - 1,
+		"%s: %i", "Content-Length", 0);
+	} else {
+		snprintf(buf, sizeof(buf) - 1,
+		"%s: %zu", "Content-Length", strlen(a->body));
+	}
+
+	if (!request_add_header(r, buf))
+		return false;
 	return true;
 }
 
 static inline
 bool
-request_set_put(struct request_t *c)
+request_add_header_accept(struct request_t *r)
 {
-	assert(c);
-	assert(c->easy);
-	if (!request_add_header(c, "Accept: */*"))
-	return false;
-	curl_easy_setopt(c->easy, CURLOPT_UPLOAD, 1L);
+	assert(r);
+	assert(r->easy);
+	if (!request_add_header(r, "Accept: */*"))
+		return false;
 	return true;
 }
 
@@ -154,10 +157,10 @@ curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size)
 	ctx->done	 = false;
 
 	struct curl_args_t args = {
-	.pipeline = pipeline,
-	.max_conns = max_conn,
-	.pool_size = pool_size,
-	.buffer_size = buffer_size
+		.pipeline = pipeline,
+		.max_conns = max_conn,
+		.pool_size = pool_size,
+		.buffer_size = buffer_size
 	};
 
 	ctx->curl_ctx = curl_ctx_new(&args);
@@ -184,10 +187,11 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		const struct request_start_args_t* req_args)
 {
 	const char *reason = "unknown error";
-	if (ctx == NULL) {
-		say_error("can't get lib ctx");
-		return NULL;
-	}
+	assert(ctx);
+	assert(method);
+	assert(url);
+	assert(req_args);
+
 	ctx->done = false;
 	if (ctx->done) {
 		say_error("curl stopped");
@@ -200,11 +204,7 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		return NULL;
 	}
 
-	char header[20];
-	snprintf(header, sizeof(header) - 1,
-	"%s: %zu", "Content-Length", strlen(req_args->body));
-
-	if (!request_add_header(r, header)) {
+	if (!request_add_header_CL(r, req_args)) {
 		reason = "can't allocate memory (request_add_header)";
 		goto error_exit;
 	}
@@ -250,16 +250,18 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		curl_easy_setopt(r->easy, CURLOPT_NOBODY, 1L);
 	}
 	else if (strncmp(method, "POST", sizeof("POST") - 1) == 0) {
-		if (!request_set_post(r)) {
+		if (!request_add_header_accept(r)) {
 			reason = "can't allocate memory (request_set_post)";
 			goto error_exit;
 		}
+		curl_easy_setopt(r->easy, CURLOPT_POST, 1L);
 	}
 	else if (strncmp(method, "PUT", sizeof("PUT") - 1) == 0) {
-		if (!request_set_put(r)) {
+		if (!request_add_header_accept(r)) {
 			reason = "can't allocate memory (request_set_put)";
 			goto error_exit;
 		}
+		curl_easy_setopt(r->easy, CURLOPT_UPLOAD, 1L);
 	}
 	else if (strncmp(method, "OPTIONS", sizeof("OPTIONS") - 1) == 0) {
 		 curl_easy_setopt(r->easy, CURLOPT_CUSTOMREQUEST, "OPTIONS");
@@ -455,7 +457,7 @@ timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
 {
 	(void) loop;
 
-	say_info("w = %p, revents = %i", (void *) w, revents);
+	say_info("timer_cb: w = %p, revents = %i", (void *) w, revents);
 
 	struct curl_ctx_t *l = (struct curl_ctx_t *) w->data;
 	CURLMcode rc = curl_multi_socket_action(l->multi,
@@ -597,32 +599,19 @@ read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 
 static
 size_t
-push_to_dyn_buffer(struct data_buf_t* bufp, char *data, size_t size)
+push_to_dyn_buffer(struct ibuf* bufp, char *data, size_t size)
 {
-	if (bufp->written + size + 1 > bufp->allocated) {
-		/*TODO: may be better strategy of allocating */
-		bufp->allocated += 3 * size;
-		char *tmp = (char*) malloc(sizeof(char) * bufp->allocated);
+	assert(data);
+	assert(bufp);
 
-		if (!tmp) {
-			say(S_ERROR, "in %s:%d \
-				can't allocate memory for dynamic buffer\n",
+	char* p = (char*) ibuf_alloc(bufp, size);
+	if (!p) {
+		say(S_ERROR, "in %s:%d \
+				can't allocate memory for input buffer\n",
 				__FILE__, __LINE__);
-		/* We just won't write anything to buffer. Only log about error.
-		* But not hang with done_cb in case we return sth
-		* not equal to size*/
-			return size;
-		}
-		/* may be written + 1 in sake of the last 0-byte*/
-		memcpy(tmp, bufp->data, bufp->written);
-		free(bufp->data);
-		bufp->data = tmp;
+		return size;
 	}
-
-	assert(bufp->data);
-	memcpy(bufp->data + bufp->written, data, size);
-	bufp->written += size;
-	bufp->data[bufp->written] = 0;
+	memcpy(p, data, size);
 	return size;
 }
 
@@ -822,21 +811,9 @@ create_request(struct curl_ctx_t *ctx, size_t idx, size_t size_buf,
 
 	reset_request(r);
 
-	r->response.headers_buf.data = (char*) malloc(size_buf * sizeof(char));
-	if (!r->response.headers_buf.data) {
-		say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory \
-				for header buffer\n", __FILE__, __LINE__);
-		return false;
-	}
-	r->response.headers_buf.allocated = size_buf;
+	ibuf_create(&r->response.headers_buf, &cord()->slabc, size_buf);
 
-	r->response.body_buf.data = (char*) malloc(size_buf * sizeof(char));
-	if (!r->response.body_buf.data) {
-		say(S_ERROR ,"in %s:%d: Internal error. Can't allocate memory \
-				for body buffer\n", __FILE__, __LINE__);
-		return false;
-	}
-	r->response.body_buf.allocated = size_buf;
+	ibuf_create(&r->response.body_buf, &cord()->slabc, size_buf);
 
 	r->cond = (struct ipc_cond*) malloc(sizeof(struct ipc_cond));
 	if (!r->cond) {
@@ -862,13 +839,9 @@ reset_request(struct request_t *r)
 		r->headers = NULL;
 	}
 
-	r->response.headers_buf.written = 0;
-	if (r->response.headers_buf.data)
-		r->response.headers_buf.data[0] = 0;
 
-	r->response.body_buf.written = 0;
-	if (r->response.body_buf.data)
-		r->response.body_buf.data[0] = 0;
+	ibuf_reset(&r->response.headers_buf);
+	ibuf_reset(&r->response.body_buf);
 
 	r->read = 0;
 	r->sent = 0;
@@ -925,14 +898,9 @@ request_pool_free(struct request_pool_t *p)
 		for (size_t i = 0; i < p->size; ++i) {
 			struct request_t *r = &p->mem[i];
 			reset_request(r);
-			if (r->response.headers_buf.data) {
-				free(r->response.headers_buf.data);
-				r->response.headers_buf.data = NULL;
-			}
-			if (r->response.body_buf.data) {
-				free(r->response.body_buf.data);
-				r->response.body_buf.data = NULL;
-			}
+
+			ibuf_destroy(&r->response.headers_buf);
+			ibuf_destroy(&r->response.body_buf);
 
 			if (r->cond) {
 				ipc_cond_destroy(r->cond);
@@ -944,7 +912,6 @@ request_pool_free(struct request_pool_t *p)
 		p->mem = NULL;
 	}
 }
-
 
 struct request_t*
 request_pool_get_request(struct request_pool_t *p)
@@ -987,7 +954,6 @@ request_pool_free_request(struct request_pool_t *p, struct request_t *r)
 
 	reset_request(r);
 }
-
 
 size_t
 request_pool_get_free_size(struct request_pool_t *p)

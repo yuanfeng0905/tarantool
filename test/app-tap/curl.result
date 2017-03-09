@@ -3,14 +3,14 @@ TAP version 13
     # basic http post/get
     1..11
     ok - client is created
-    ok - http code page exists
-    ok - not empty body page exists
-    ok - http_code page not exists
-    ok -  not empty body page not exists
-    ok - https check: http code page exists
-    ok - https check: not empty body page exists
-    ok - post headers
-    ok - put headers
+    ok - GET: http code page exists
+    ok - GET: not empty body page exists
+    ok - GET: right body
+    ok - GET: http_code page not exists
+    ok - GET: not empty body page not exists
+    ok - GET: right body page not exists
+    ok - POST: headers
+    ok - PUT: headers
     ok - stats checking
     ok - tarantool/curl/issues/3
     # basic http post/get: end

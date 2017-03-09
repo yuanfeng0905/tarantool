@@ -29,7 +29,7 @@
 --	SUCH DAMAGE.
 --
 
-local fiber		= require('fiber')
+local fiber = require('fiber')
 local driver = require('curl.driver')
 
 local curl_mt
@@ -41,6 +41,8 @@ local curl_mt
 --
 --	pipeline - set to true to enable pipelining for this multi handle */
 --	max_conns -  Maximum number of entries in the connection cache */
+--	pool_size - size of pool of requests
+--	buffer_size - initial size of buffers of response
 --
 --	Returns:
 --	 curl object or raise error()
@@ -55,10 +57,12 @@ local http = function(opts)
 	opts.pool_size = opts.pool_size or 1000
 	opts.buffer_size = opts.buffer_size or 2048
 
+	local ok, version = driver.version()
 	local curl = driver.new(opts.pipeline, opts.max_conns, opts.pool_size,
 					opts.buffer_size)
-	return setmetatable({curl = curl, },
-						 curl_mt )
+	return setmetatable({	VERSION = version,
+				curl = curl, },
+				curl_mt )
 end
 
 
