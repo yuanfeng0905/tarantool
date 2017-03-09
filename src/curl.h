@@ -64,7 +64,7 @@ struct header {
 	const char* value;
 };
 
-struct request_start_args_t{
+struct curl_request_args_t {
 
 	/* Max amount of cached alive Connections */
 	long max_conns;
@@ -112,17 +112,17 @@ struct request_start_args_t{
 	struct header* headers;
 };
 
-struct request_pool_t{
-	struct	request_t *mem;
+struct curl_request_pool_t{
+	struct	curl_request_t *mem;
 	size_t	size;
 };
 
-struct curl_ctx_t {
+struct internal_ctx_t {
 
 	struct ev_loop	*loop;
 	struct ev_timer timer_event;
 
-	struct	request_pool_t cpool;
+	struct	curl_request_pool_t cpool;
 
 	CURLM	*multi;
 	int 	still_running;
@@ -140,13 +140,13 @@ struct curl_ctx_t {
 	} stat;
 };
 
-struct lib_ctx_t{
-	struct curl_ctx_t *curl_ctx;
+struct curl_ctx_t{
+	struct internal_ctx_t *internal_ctx;
 	bool done;
 };
 
 
-struct request_t {
+struct curl_request_t {
 
 	/* pool meta info */
 	struct {
@@ -157,8 +157,8 @@ struct request_t {
 	/** Information associated with a specific easy handle */
 	CURL *easy;
 
-	/* Reference to curl context */
-	struct curl_ctx_t *curl_ctx;
+	/* Reference to internal context */
+	struct internal_ctx_t *internal_ctx;
 
 	/* HTTP headers */
 	struct curl_slist *headers;
@@ -190,11 +190,11 @@ struct request_t {
  * Curl context API
  * {{{
  */
-struct lib_ctx_t*
+struct curl_ctx_t*
 curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size);
 
 void
-curl_delete(struct lib_ctx_t *ctx);
+curl_delete(struct curl_ctx_t *ctx);
 
 /* }}}
  */
@@ -206,7 +206,7 @@ curl_delete(struct lib_ctx_t *ctx);
 
 static inline
 void
-request_start_args_init(struct request_start_args_t *a)
+curl_request_args_init(struct curl_request_args_t *a)
 {
 	assert(a);
 	a->max_conns = -1;
@@ -225,7 +225,7 @@ request_start_args_init(struct request_start_args_t *a)
 }
 
 /*
-	 <http_request> This function does async HTTP request
+	 <curl_send_request> This function does async HTTP request
 
 	Parameters:
 
@@ -268,17 +268,17 @@ request_start_args_init(struct request_start_args_t *a)
 			curl_verbose - make libcurl verbose!;
 
 		Returns:
-			 pointer structure request_t
+			 pointer structure curl_request_t
 		You can get needed data with according functions
 */
 
-struct request_t*
-http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
-		const struct request_start_args_t* args);
+struct curl_request_t*
+curl_send_request(struct curl_ctx_t *ctx, const char* method, const char* url,
+		const struct curl_request_args_t* args);
 
 static inline
 char*
-get_headers(struct request_t* r)
+get_headers(struct curl_request_t* r)
 {
 	if (ibuf_used(&r->response.headers_buf) <= 0)
 		return NULL;
@@ -296,7 +296,7 @@ get_headers(struct request_t* r)
 
 static inline
 char*
-get_body(struct request_t* r)
+get_body(struct curl_request_t* r)
 {
 	if (ibuf_used(&r->response.body_buf) <= 0)
 		return NULL;
@@ -314,21 +314,21 @@ get_body(struct request_t* r)
 
 static inline
 int
-get_http_code(struct request_t* r)
+get_http_code(struct curl_request_t* r)
 {
 	return r->response.http_code;
 }
 
 static inline
 const char*
-get_errmsg(struct request_t* r)
+get_errmsg(struct curl_request_t* r)
 {
 	return r->response.errmsg;
 }
 
 static inline
 bool
-request_add_header(struct request_t *c, const char *http_header)
+curl_request_add_header(struct curl_request_t *c, const char *http_header)
 {
 	assert(c);
 	assert(http_header);
@@ -340,7 +340,7 @@ request_add_header(struct request_t *c, const char *http_header)
 }
 
 void
-free_request(struct lib_ctx_t* ctx, struct request_t *r);
+curl_request_delete(struct curl_ctx_t* ctx, struct curl_request_t *r);
 
 /*
  * }}}
@@ -350,21 +350,22 @@ free_request(struct lib_ctx_t* ctx, struct request_t *r);
  * {{{
  */
 
-struct curl_ctx_t*
+struct internal_ctx_t*
 curl_ctx_new(const struct curl_args_t *a);
 
 void
-curl_destroy(struct curl_ctx_t *l);
+curl_ctx_delete(struct internal_ctx_t *l);
 
 /* request pool API
  * used for stat info
  */
 
 size_t
-request_pool_get_free_size(struct request_pool_t *p);
+curl_request_pool_get_free_size(struct curl_request_pool_t *p);
 
 void
-request_pool_free_request(struct request_pool_t *p, struct request_t *c);
+curl_request_pool_free_request(struct curl_request_pool_t *p,
+		struct curl_request_t *c);
 
 /*
  * }}}

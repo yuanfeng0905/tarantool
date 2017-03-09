@@ -48,13 +48,13 @@
 
 static
 int
-curl_make_result(lua_State *L, struct request_t* r);
+curl_make_result(lua_State *L, struct curl_request_t* r);
 
 static inline
-struct lib_ctx_t*
+struct curl_ctx_t*
 ctx_get(lua_State *L)
 {
-	return (struct lib_ctx_t *)
+	return (struct curl_ctx_t *)
 			luaL_checkudata(L, 1, DRIVER_LUA_UDATA_NAME);
 }
 
@@ -75,7 +75,7 @@ int
 luaT_curl_request(lua_State *L)
 {
 	const char *reason = "unknown error";
-	struct lib_ctx_t *ctx = ctx_get(L);
+	struct curl_ctx_t *ctx = ctx_get(L);
 	if (ctx == NULL)
 		return luaL_error(L, "can't get lib ctx");
 
@@ -83,8 +83,8 @@ luaT_curl_request(lua_State *L)
 	if (ctx->done)
 		return luaL_error(L, "curl stopped");
 
-	struct request_start_args_t req_args;
-	request_start_args_init(&req_args);
+	struct curl_request_args_t req_args;
+	curl_request_args_init(&req_args);
 
 	const char *method = luaL_checkstring(L, 2);
 	const char *url    = luaL_checkstring(L, 3);
@@ -217,7 +217,8 @@ luaT_curl_request(lua_State *L)
 	}
 	/* }}} */
 
-	struct request_t* r = http_request(ctx, method, url, &req_args);
+	struct curl_request_t* r =
+		curl_send_request(ctx, method, url, &req_args);
 
 	if (hh)
 		free(hh);
@@ -228,7 +229,7 @@ luaT_curl_request(lua_State *L)
 	}
 
 	int res = curl_make_result(L, r);
-	free_request(ctx, r);
+	curl_request_delete(ctx, r);
 	return	res;
 
 error_exit:
@@ -239,11 +240,11 @@ static
 int
 get_stat(lua_State *L)
 {
-	struct lib_ctx_t *ctx = ctx_get(L);
+	struct curl_ctx_t *ctx = ctx_get(L);
 	if (ctx == NULL)
 		return luaL_error(L, "can't get lib ctx");
 
-	struct curl_ctx_t *l = ctx->curl_ctx;
+	struct internal_ctx_t *l = ctx->internal_ctx;
 	if (l == NULL)
 		return luaL_error(L, "it doesn't initialized");
 
@@ -262,7 +263,7 @@ get_stat(lua_State *L)
 
 static
 int
-curl_make_result(lua_State *L, struct request_t *r)
+curl_make_result(lua_State *L, struct curl_request_t *r)
 {
 	lua_newtable(L);
 
@@ -325,11 +326,11 @@ static
 int
 pool_stat(lua_State *L)
 {
-	struct lib_ctx_t *ctx = ctx_get(L);
+	struct curl_ctx_t *ctx = ctx_get(L);
 	if (ctx == NULL)
 		return luaL_error(L, "can't get lib ctx");
 
-	struct curl_ctx_t *l = ctx->curl_ctx;
+	struct internal_ctx_t *l = ctx->internal_ctx;
 	if (l == NULL)
 		return luaL_error(L, "it doesn't initialized");
 
@@ -337,7 +338,7 @@ pool_stat(lua_State *L)
 
 	add_field_u64(L, "pool_size", (uint64_t) l->cpool.size);
 	add_field_u64(L, "free",
-			(uint64_t) request_pool_get_free_size(&l->cpool));
+			(uint64_t) curl_request_pool_get_free_size(&l->cpool));
 
 	return 1;
 }
@@ -373,12 +374,12 @@ int
 new(lua_State *L)
 {
 
-	struct lib_ctx_t *ctx = (struct lib_ctx_t *)
-			lua_newuserdata(L, sizeof(struct lib_ctx_t));
+	struct curl_ctx_t *ctx = (struct curl_ctx_t *)
+			lua_newuserdata(L, sizeof(struct curl_ctx_t));
 	if (ctx == NULL)
-		return luaL_error(L, "lua_newuserdata failed: lib_ctx_t");
+		return luaL_error(L, "lua_newuserdata failed: curl_ctx_t");
 
-	ctx->curl_ctx = NULL;
+	ctx->internal_ctx = NULL;
 	ctx->done	 = false;
 
 	struct curl_args_t args = { .pipeline = false,
@@ -392,8 +393,8 @@ new(lua_State *L)
 	args.max_conns = luaL_checklong(L, 2);
 	args.pool_size = (size_t) luaL_checklong(L, 3);
 	args.buffer_size = (size_t) luaL_checklong(L, 4);
-	ctx->curl_ctx = curl_ctx_new(&args);
-	if (ctx->curl_ctx == NULL)
+	ctx->internal_ctx = curl_ctx_new(&args);
+	if (ctx->internal_ctx == NULL)
 		return luaL_error(L, "curl_new failed");
 
 	luaL_getmetatable(L, DRIVER_LUA_UDATA_NAME);

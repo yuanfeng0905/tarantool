@@ -29,15 +29,9 @@
  * SUCH DAMAGE.
  */
 #include <assert.h>
-#include <unistd.h>
-#include <inttypes.h>
-#include <stdbool.h>
 
-#include <stdlib.h>
-#include <string.h>
 #include <ipc.h>
 #include "curl.h"
-#include "say.h"
 #include "lua/utils.h"
 
 
@@ -47,25 +41,22 @@
 
 static
 bool
-request_pool_new(struct request_pool_t *p, struct curl_ctx_t *c,
+curl_request_pool_new(struct curl_request_pool_t *p, struct internal_ctx_t *c,
 		size_t s, size_t buffer_size);
 
 static
 void
-request_pool_free(struct request_pool_t *p);
+curl_request_pool_delete(struct curl_request_pool_t *p);
 
-static
-struct request_t*
-request_pool_get_request(struct request_pool_t *p);
 
 static inline
-struct request_t*
-new_request(struct curl_ctx_t *ctx);
+struct curl_request_t*
+curl_request_new(struct internal_ctx_t *ctx);
 
 static inline
 bool
-request_add_header_keepalive(struct request_t *r,
-		const struct request_start_args_t *a)
+curl_request_add_header_keepalive(struct curl_request_t *r,
+		const struct curl_request_args_t *a)
 {
 	static char buf[255];
 
@@ -75,15 +66,15 @@ request_add_header_keepalive(struct request_t *r,
 	snprintf(buf, sizeof(buf) - 1, "Keep-Alive: timeout=%d",
 			 (int) a->keepalive_idle);
 
-	if (!request_add_header(r, buf))
+	if (!curl_request_add_header(r, buf))
 		return false;
 	return true;
 }
 
 static inline
 bool
-request_add_header_CL(struct request_t *r,
-		const struct request_start_args_t *a)
+curl_request_add_header_CL(struct curl_request_t *r,
+		const struct curl_request_args_t *a)
 {
 	assert(r);
 	assert(a);
@@ -96,25 +87,26 @@ request_add_header_CL(struct request_t *r,
 		"%s: %zu", "Content-Length", strlen(a->body));
 	}
 
-	if (!request_add_header(r, buf))
+	if (!curl_request_add_header(r, buf))
 		return false;
 	return true;
 }
 
 static inline
 bool
-request_add_header_accept(struct request_t *r)
+curl_request_add_header_accept(struct curl_request_t *r)
 {
 	assert(r);
 	assert(r->easy);
-	if (!request_add_header(r, "Accept: */*"))
+	if (!curl_request_add_header(r, "Accept: */*"))
 		return false;
 	return true;
 }
 
 static
 CURLMcode
-request_start(struct request_t *r, const struct request_start_args_t *a);
+curl_request_start(struct curl_request_t *r, 
+		const struct curl_request_args_t *a);
 
 /* }}}
  */
@@ -123,9 +115,9 @@ request_start(struct request_t *r, const struct request_start_args_t *a);
  * {{{
  */
 
-struct sock_t {
+struct curl_sock_t {
 	CURL *easy;
-	struct curl_ctx_t *curl_ctx;
+	struct internal_ctx_t *internal_ctx;
 	struct ev_io ev;
 
 	curl_socket_t sockfd;
@@ -141,11 +133,11 @@ struct sock_t {
 /** lib C API {{{
  */
 
-struct lib_ctx_t*
+struct curl_ctx_t*
 curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size)
 {
-	struct lib_ctx_t *ctx =
-		(struct lib_ctx_t *) malloc (sizeof(struct lib_ctx_t));
+	struct curl_ctx_t *ctx =
+		(struct curl_ctx_t *) malloc (sizeof(struct curl_ctx_t));
 
 	if (ctx == NULL) {
 		say_error("In:%s:%d: Can't allocate memory for curl context",
@@ -153,7 +145,7 @@ curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size)
 		return ctx;
 	}
 
-	ctx->curl_ctx = NULL;
+	ctx->internal_ctx = NULL;
 	ctx->done	 = false;
 
 	struct curl_args_t args = {
@@ -163,8 +155,8 @@ curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size)
 		.buffer_size = buffer_size
 	};
 
-	ctx->curl_ctx = curl_ctx_new(&args);
-	if (ctx->curl_ctx == NULL) {
+	ctx->internal_ctx = curl_ctx_new(&args);
+	if (ctx->internal_ctx == NULL) {
 		say_error("In %s:%d: curl_new failed", __FILE__, __LINE__);
 		return NULL;
 	}
@@ -172,19 +164,19 @@ curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size)
 }
 
 void
-curl_delete(struct lib_ctx_t *ctx)
+curl_delete(struct curl_ctx_t *ctx)
 {
 	if (ctx == NULL)
 		return;
 
 	ctx->done = true;
 
-	curl_destroy(ctx->curl_ctx);
+	curl_ctx_delete(ctx->internal_ctx);
 }
 
-struct request_t*
-http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
-		const struct request_start_args_t* req_args)
+struct curl_request_t*
+curl_send_request(struct curl_ctx_t *ctx, const char* method, const char* url,
+		const struct curl_request_args_t* req_args)
 {
 	const char *reason = "unknown error";
 	assert(ctx);
@@ -198,14 +190,14 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		return NULL;
 	}
 
-	struct request_t *r = new_request(ctx->curl_ctx);
+	struct curl_request_t *r = curl_request_new(ctx->internal_ctx);
 	if (r == NULL) {
 		say_error("can't get request obj from pool");
 		return NULL;
 	}
 
-	if (!request_add_header_CL(r, req_args)) {
-		reason = "can't allocate memory (request_add_header)";
+	if (!curl_request_add_header_CL(r, req_args)) {
+		reason = "can't allocate memory (curl_request_add_header)";
 		goto error_exit;
 	}
 
@@ -220,9 +212,9 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		for (;h->key; h++) {
 			snprintf(tmp, sizeof(tmp) - 1, "%s: %s",
 					h->key, h->value);
-			if (!request_add_header(r, tmp)) {
+			if (!curl_request_add_header(r, tmp)) {
 				reason = "can't allocate memory\
-					  (request_add_header)";
+					  (curl_request_add_header)";
 				goto error_exit;
 			}
 		}
@@ -250,14 +242,14 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		curl_easy_setopt(r->easy, CURLOPT_NOBODY, 1L);
 	}
 	else if (strncmp(method, "POST", sizeof("POST") - 1) == 0) {
-		if (!request_add_header_accept(r)) {
+		if (!curl_request_add_header_accept(r)) {
 			reason = "can't allocate memory (request_set_post)";
 			goto error_exit;
 		}
 		curl_easy_setopt(r->easy, CURLOPT_POST, 1L);
 	}
 	else if (strncmp(method, "PUT", sizeof("PUT") - 1) == 0) {
-		if (!request_add_header_accept(r)) {
+		if (!curl_request_add_header_accept(r)) {
 			reason = "can't allocate memory (request_set_put)";
 			goto error_exit;
 		}
@@ -280,7 +272,7 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 		goto error_exit;
 	}
 
-	CURLMcode mcode  = request_start(r, req_args);
+	CURLMcode mcode  = curl_request_start(r, req_args);
 	if (mcode != CURLM_OK) {
 		if (mcode != CURLM_LAST)
 			reason = curl_multi_strerror(mcode);
@@ -293,14 +285,14 @@ http_request(struct lib_ctx_t *ctx, const char* method, const char* url,
 	return r;
 error_exit:
 	say_error("%s", reason);
-	free_request(ctx, r);
+	curl_request_delete(ctx, r);
 	return NULL;
 }
 
 void
-free_request(struct lib_ctx_t* ctx, struct request_t *r)
+curl_request_delete(struct curl_ctx_t* ctx, struct curl_request_t *r)
 {
-	request_pool_free_request(&ctx->curl_ctx->cpool, r);
+	curl_request_pool_free_request(&ctx->internal_ctx->cpool, r);
 }
 
 /* }}}
@@ -308,7 +300,7 @@ free_request(struct lib_ctx_t* ctx, struct request_t *r)
 
 
 #define is_mcode_good(mcode) is_mcode_good_(__FUNCTION__, (mcode))
-static void timer_cb(EV_P_ struct ev_timer *w, int revents);
+static void curl_timer_cb(EV_P_ struct ev_timer *w, int revents);
 
 static inline
 bool
@@ -360,21 +352,21 @@ is_mcode_good_(const char *where __attribute__((unused)),
  */
 static
 int
-multi_timer_cb(CURLM *multi __attribute__((unused)),
+curl_multi_timer_cb(CURLM *multi __attribute__((unused)),
 				long timeout_ms,
 				void *ctx)
 {
-	struct curl_ctx_t *l = (struct curl_ctx_t *) ctx;
+	struct internal_ctx_t *l = (struct internal_ctx_t *) ctx;
 
 	ev_timer_stop(l->loop, &l->timer_event);
 	if (timeout_ms > 0) {
 		ev_timer_init(&l->timer_event,
-				timer_cb,
+				curl_timer_cb,
 				(double) (timeout_ms / 1000), 0.);
 		ev_timer_start(l->loop, &l->timer_event);
 	}
 	else
-		timer_cb(l->loop, &l->timer_event, 0);
+		curl_timer_cb(l->loop, &l->timer_event, 0);
 	return 0;
 }
 
@@ -383,12 +375,12 @@ multi_timer_cb(CURLM *multi __attribute__((unused)),
  */
 static
 void
-check_multi_info(struct curl_ctx_t *l)
+curl_check_multi_info(struct internal_ctx_t *l)
 {
 	char *eff_url;
 	CURLMsg	 *msg;
 	int msgs_left;
-	struct request_t *r;
+	struct curl_request_t *r;
 	long http_code;
 
 	while ((msg = curl_multi_info_read(l->multi, &msgs_left))) {
@@ -426,11 +418,11 @@ check_multi_info(struct curl_ctx_t *l)
  */
 static
 void
-event_cb(EV_P_ struct ev_io *w, int revents)
+curl_event_cb(EV_P_ struct ev_io *w, int revents)
 {
 	(void) loop;
 
-	struct curl_ctx_t *l = (struct curl_ctx_t*) w->data;
+	struct internal_ctx_t *l = (struct internal_ctx_t*) w->data;
 
 	const int action = ( (revents & EV_READ ? CURL_POLL_IN : 0) |
 				(revents & EV_WRITE ? CURL_POLL_OUT : 0) );
@@ -440,7 +432,7 @@ event_cb(EV_P_ struct ev_io *w, int revents)
 	if (!is_mcode_good(rc))
 		++l->stat.failed_requests;
 
-	check_multi_info(l);
+	curl_check_multi_info(l);
 
 	if (l->still_running <= 0) {
 		say_info("last transfer done, kill timeout");
@@ -453,26 +445,26 @@ event_cb(EV_P_ struct ev_io *w, int revents)
  */
 static
 void
-timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
+curl_timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
 {
 	(void) loop;
 
 	say_info("timer_cb: w = %p, revents = %i", (void *) w, revents);
 
-	struct curl_ctx_t *l = (struct curl_ctx_t *) w->data;
+	struct internal_ctx_t *l = (struct internal_ctx_t *) w->data;
 	CURLMcode rc = curl_multi_socket_action(l->multi,
 			CURL_SOCKET_TIMEOUT, 0, &l->still_running);
 	if (!is_mcode_good(rc))
 		++l->stat.failed_requests;
 
-	check_multi_info(l);
+	curl_check_multi_info(l);
 }
 
-/** Clean up the sock_t structure
+/** Clean up the curl_sock_t structure
  */
 static inline
 void
-remsock(struct sock_t *f, struct curl_ctx_t *l)
+curl_remove_sock(struct curl_sock_t *f, struct internal_ctx_t *l)
 {
 	say_info("removing socket");
 
@@ -488,15 +480,15 @@ remsock(struct sock_t *f, struct curl_ctx_t *l)
 }
 
 
-/** Assign information to a sock_t structure
+/** Assign information to a curl_sock_t structure
  */
 static inline
 void
-setsock(struct sock_t *f,
+curl_set_sock(struct curl_sock_t *f,
 		curl_socket_t s,
 		CURL *e,
 		int act,
-		struct curl_ctx_t *l)
+		struct internal_ctx_t *l)
 {
 	say_info("set new socket");
 
@@ -512,31 +504,32 @@ setsock(struct sock_t *f,
 	if (f->evset)
 		ev_io_stop(l->loop, &f->ev);
 
-	ev_io_init(&f->ev, event_cb, f->sockfd, kind);
+	ev_io_init(&f->ev, curl_event_cb, f->sockfd, kind);
 	ev_io_start(l->loop, &f->ev);
 }
 
 
-/** Initialize a new sock_t structure
+/** Initialize a new curl_sock_t structure
  */
 static
 bool
-addsock(curl_socket_t s, CURL *easy, int action, struct curl_ctx_t *l)
+curl_add_sock(curl_socket_t s, CURL *easy, int action, struct internal_ctx_t *l)
 {
-	struct sock_t *fdp = (struct sock_t *) malloc(sizeof(struct sock_t));
+	struct curl_sock_t *fdp = (struct curl_sock_t *)
+		malloc(sizeof(struct curl_sock_t));
 	if (fdp == NULL)
 		return false;
 
-	memset(fdp, 0, sizeof(struct sock_t));
+	memset(fdp, 0, sizeof(struct curl_sock_t));
 
 
-	fdp->curl_ctx = l;
+	fdp->internal_ctx = l;
 
-	setsock(fdp, s, easy, action, l);
+	curl_set_sock(fdp, s, easy, action, l);
 
 	curl_multi_assign(l->multi, s, fdp);
 
-	++fdp->curl_ctx->stat.sockets_added;
+	++fdp->internal_ctx->stat.sockets_added;
 
 	return true;
 }
@@ -545,10 +538,10 @@ addsock(curl_socket_t s, CURL *easy, int action, struct curl_ctx_t *l)
 /* CURLMOPT_SOCKETFUNCTION */
 static
 int
-sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
+curl_sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 {
-	struct curl_ctx_t *l = (struct curl_ctx_t*) cbp;
-	struct sock_t	 *fdp = (struct sock_t*) sockp;
+	struct internal_ctx_t *l = (struct internal_ctx_t*) cbp;
+	struct curl_sock_t *fdp = (struct curl_sock_t*) sockp;
 
 	static const char *whatstr[] = {
 		"none", "IN", "OUT", "INOUT", "REMOVE" };
@@ -557,16 +550,16 @@ sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 			e, s, whatstr[what], cbp, sockp);
 
 	if (what == CURL_POLL_REMOVE)
-		remsock(fdp, l);
+		curl_remove_sock(fdp, l);
 	else {
 		if (fdp == NULL) {
-			if (!addsock(s, e, what, l))
+			if (!curl_add_sock(s, e, what, l))
 				return 1;
 			}
 		else {
 			say_info("Changing action from = %s, to = %s",
 					whatstr[fdp->action], whatstr[what]);
-			setsock(fdp, s, e, what, l);
+			curl_set_sock(fdp, s, e, what, l);
 		}
 	}
 
@@ -578,11 +571,11 @@ sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
  */
 static
 size_t
-read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
+curl_read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 {
 	say_info("size = %zu, nmemb = %zu", size, nmemb);
 
-	struct request_t *r = (struct request_t *) ctx;
+	struct curl_request_t *r = (struct curl_request_t *) ctx;
 	const size_t total_size = size * nmemb;
 	if (!r->body) {
 		return total_size;
@@ -599,7 +592,7 @@ read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 
 static
 size_t
-push_to_dyn_buffer(struct ibuf* bufp, char *data, size_t size)
+curl_push_buffer(struct ibuf* bufp, char *data, size_t size)
 {
 	assert(data);
 	assert(bufp);
@@ -617,35 +610,35 @@ push_to_dyn_buffer(struct ibuf* bufp, char *data, size_t size)
 
 static
 size_t
-write_cb(char *ptr, size_t size, size_t nmemb, void *ctx)
+curl_write_cb(char *ptr, size_t size, size_t nmemb, void *ctx)
 {
 	say_info("size = %zu, nmemb = %zu", size, nmemb);
 
-	struct request_t *r = (struct request_t *) ctx;
+	struct curl_request_t *r = (struct curl_request_t *) ctx;
 	const size_t bytes = size * nmemb;
 
-	return push_to_dyn_buffer(&r->response.body_buf, ptr, bytes);
+	return curl_push_buffer(&r->response.body_buf, ptr, bytes);
 }
 
 
 static
 size_t
-header_cb(char *buffer, size_t size, size_t nitems, void *ctx)
+curl_header_cb(char *buffer, size_t size, size_t nitems, void *ctx)
 {
 	say_info("size = %zu, mitems = %zu", size, nitems);
-	struct request_t *r = (struct request_t*) ctx;
+	struct curl_request_t *r = (struct curl_request_t*) ctx;
 	const size_t bytes = size * nitems;
-	return push_to_dyn_buffer(&r->response.headers_buf, buffer, bytes);
+	return curl_push_buffer(&r->response.headers_buf, buffer, bytes);
 }
 
 static
 CURLMcode
-request_start(struct request_t *r, const struct request_start_args_t *a)
+curl_request_start(struct curl_request_t *r, const struct curl_request_args_t *a)
 {
 	assert(r);
 	assert(a);
 	assert(r->easy);
-	assert(r->curl_ctx);
+	assert(r->internal_ctx);
 
 	if (a->max_conns > 0)
 		curl_easy_setopt(r->easy, CURLOPT_MAXCONNECTS, a->max_conns);
@@ -661,15 +654,15 @@ request_start(struct request_t *r, const struct request_start_args_t *a)
 				a->keepalive_idle);
 		curl_easy_setopt(r->easy,
 				CURLOPT_TCP_KEEPINTVL, a->keepalive_interval);
-		if (!request_add_header(r, "Connection: Keep-Alive") &&
-			!request_add_header_keepalive(r, a))
+		if (!curl_request_add_header(r, "Connection: Keep-Alive") &&
+			!curl_request_add_header_keepalive(r, a))
 		{
-			++r->curl_ctx->stat.failed_requests;
+			++r->internal_ctx->stat.failed_requests;
 			return CURLM_OUT_OF_MEMORY;
 		}
 	} else {
-		if (!request_add_header(r, "Connection: close")) {
-			++r->curl_ctx->stat.failed_requests;
+		if (!curl_request_add_header(r, "Connection: close")) {
+			++r->internal_ctx->stat.failed_requests;
 			return CURLM_OUT_OF_MEMORY;
 		}
 	}
@@ -696,13 +689,13 @@ request_start(struct request_t *r, const struct request_start_args_t *a)
 
 	curl_easy_setopt(r->easy, CURLOPT_PRIVATE, (void *) r);
 
-	curl_easy_setopt(r->easy, CURLOPT_READFUNCTION, read_cb);
+	curl_easy_setopt(r->easy, CURLOPT_READFUNCTION, curl_read_cb);
 	curl_easy_setopt(r->easy, CURLOPT_READDATA, (void *) r);
 
-	curl_easy_setopt(r->easy, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(r->easy, CURLOPT_WRITEFUNCTION, curl_write_cb);
 	curl_easy_setopt(r->easy, CURLOPT_WRITEDATA, (void *) r);
 
-	curl_easy_setopt(r->easy, CURLOPT_HEADERFUNCTION, header_cb);
+	curl_easy_setopt(r->easy, CURLOPT_HEADERFUNCTION, curl_header_cb);
 	curl_easy_setopt(r->easy, CURLOPT_HEADERDATA, (void*) r);
 
 	curl_easy_setopt(r->easy, CURLOPT_NOPROGRESS, 1L);
@@ -721,30 +714,30 @@ request_start(struct request_t *r, const struct request_start_args_t *a)
 	if (r->headers != NULL)
 		curl_easy_setopt(r->easy, CURLOPT_HTTPHEADER, r->headers);
 
-	++r->curl_ctx->stat.total_requests;
+	++r->internal_ctx->stat.total_requests;
 
-	CURLMcode rc = curl_multi_add_handle(r->curl_ctx->multi, r->easy);
+	CURLMcode rc = curl_multi_add_handle(r->internal_ctx->multi, r->easy);
 	if (!is_mcode_good(rc)) {
-		++r->curl_ctx->stat.failed_requests;
+		++r->internal_ctx->stat.failed_requests;
 		return rc;
 	}
 	return rc;
 }
 
-struct curl_ctx_t*
+struct internal_ctx_t*
 curl_ctx_new(const struct curl_args_t *a)
 {
 	assert(a);
 
-	struct curl_ctx_t *l =
-		(struct curl_ctx_t *) malloc(sizeof(struct curl_ctx_t));
+	struct internal_ctx_t *l =
+		(struct internal_ctx_t *) malloc(sizeof(struct internal_ctx_t));
 
 	if (l == NULL)
 		return NULL;
 
-	memset(l, 0, sizeof(struct curl_ctx_t));
+	memset(l, 0, sizeof(struct internal_ctx_t));
 
-	if (!request_pool_new(&l->cpool, l, a->pool_size, a->buffer_size))
+	if (!curl_request_pool_new(&l->cpool, l, a->pool_size, a->buffer_size))
 		goto error_exit;
 
 	l->loop = loop();
@@ -755,13 +748,13 @@ curl_ctx_new(const struct curl_args_t *a)
 	if (l->multi == NULL)
 		goto error_exit;
 
-	ev_timer_init(&l->timer_event, timer_cb, 0., 0.);
+	ev_timer_init(&l->timer_event, curl_timer_cb, 0., 0.);
 	l->timer_event.data = (void *) l;
 
-	curl_multi_setopt(l->multi, CURLMOPT_SOCKETFUNCTION, sock_cb);
+	curl_multi_setopt(l->multi, CURLMOPT_SOCKETFUNCTION, curl_sock_cb);
 	curl_multi_setopt(l->multi, CURLMOPT_SOCKETDATA, (void *) l);
 
-	curl_multi_setopt(l->multi, CURLMOPT_TIMERFUNCTION, multi_timer_cb);
+	curl_multi_setopt(l->multi, CURLMOPT_TIMERFUNCTION, curl_multi_timer_cb);
 	curl_multi_setopt(l->multi, CURLMOPT_TIMERDATA, (void *) l);
 
 	if (a->pipeline)
@@ -773,12 +766,12 @@ curl_ctx_new(const struct curl_args_t *a)
 	return l;
 
 error_exit:
-	curl_destroy(l);
+	curl_ctx_delete(l);
 	return NULL;
 }
 
 void
-curl_destroy(struct curl_ctx_t *l)
+curl_ctx_delete(struct internal_ctx_t *l)
 {
 	if (l == NULL)
 		return;
@@ -786,7 +779,7 @@ curl_destroy(struct curl_ctx_t *l)
 	if (l->multi != NULL)
 		curl_multi_cleanup(l->multi);
 
-	request_pool_free(&l->cpool);
+	curl_request_pool_delete(&l->cpool);
 
 	free(l);
 }
@@ -794,22 +787,22 @@ curl_destroy(struct curl_ctx_t *l)
 /* Implementation of Pool API
  */
 static inline
-void reset_request(struct request_t *r);
+void curl_request_reset(struct curl_request_t *r);
 
 static inline
 bool
-create_request(struct curl_ctx_t *ctx, size_t idx, size_t size_buf,
-		struct request_t *r)
+curl_request_create(struct internal_ctx_t *ctx, size_t idx, size_t size_buf,
+		struct curl_request_t *r)
 {
 	assert(ctx);
 	assert(r);
 
-	memset(r, 0, sizeof(struct request_t));
+	memset(r, 0, sizeof(struct curl_request_t));
 
 	r->pool.idx = idx;
-	r->curl_ctx = ctx;
+	r->internal_ctx = ctx;
 
-	reset_request(r);
+	curl_request_reset(r);
 
 	ibuf_create(&r->response.headers_buf, &cord()->slabc, size_buf);
 
@@ -828,7 +821,7 @@ create_request(struct curl_ctx_t *ctx, size_t idx, size_t size_buf,
 
 static inline
 void
-reset_request(struct request_t *r)
+curl_request_reset(struct curl_request_t *r)
 {
 	assert(r);
 
@@ -855,49 +848,73 @@ reset_request(struct request_t *r)
 
 static
 bool
-request_pool_new(struct request_pool_t *p, struct curl_ctx_t *c, size_t s,
-		size_t size_buffer)
+curl_request_pool_new(struct curl_request_pool_t *p, struct internal_ctx_t *c,
+		size_t s, size_t size_buffer)
 {
 	assert(p);
 	assert(c);
 
-	memset(p, 0, sizeof(struct request_pool_t));
+	memset(p, 0, sizeof(struct curl_request_pool_t));
 
 	p->size = s;
 
 	p->mem =
-		(struct request_t *) malloc(p->size * sizeof(struct request_t));
+		(struct curl_request_t *) malloc(p->size *
+				sizeof(struct curl_request_t));
 	if (p->mem == NULL)
 		goto error_exit;
-	memset(p->mem, 0, p->size * sizeof(struct request_t));
+	memset(p->mem, 0, p->size * sizeof(struct curl_request_t));
 
 	for (size_t i = 0; i < p->size; ++i) {
-		if (!create_request(c, i, size_buffer, &p->mem[i]))
+		if (!curl_request_create(c, i, size_buffer, &p->mem[i]))
 			goto error_exit;
 	}
 
 	return true;
 error_exit:
-	request_pool_free(p);
+	curl_request_pool_delete(p);
 	return false;
 }
 
 static inline
-struct request_t*
-new_request(struct curl_ctx_t *ctx) {
-	return request_pool_get_request(&ctx->cpool);
+struct curl_request_t*
+curl_request_new(struct internal_ctx_t *ctx)
+{
+	struct curl_request_pool_t p = ctx->cpool;
+
+	if (p.mem == NULL)
+		return NULL;
+
+	for (size_t i = 0; i < p.size; ++i) {
+
+		if (!p.mem[i].pool.busy) {
+
+			struct curl_request_t *r = &p.mem[i];
+
+			r->easy = curl_easy_init();
+			if (r->easy == NULL)
+				return NULL;
+
+			++r->internal_ctx->stat.active_requests;
+			r->pool.busy = true;
+
+			return r;
+		}
+	}
+
+	return NULL;
 }
 
 static
 void
-request_pool_free(struct request_pool_t *p)
+curl_request_pool_delete(struct curl_request_pool_t *p)
 {
 	assert(p);
 
 	if (p->mem) {
 		for (size_t i = 0; i < p->size; ++i) {
-			struct request_t *r = &p->mem[i];
-			reset_request(r);
+			struct curl_request_t *r = &p->mem[i];
+			curl_request_reset(r);
 
 			ibuf_destroy(&r->response.headers_buf);
 			ibuf_destroy(&r->response.body_buf);
@@ -913,50 +930,23 @@ request_pool_free(struct request_pool_t *p)
 	}
 }
 
-struct request_t*
-request_pool_get_request(struct request_pool_t *p)
-{
-	assert(p);
-
-	if (p->mem == NULL)
-		return NULL;
-
-	for (size_t i = 0; i < p->size; ++i) {
-
-		if (!p->mem[i].pool.busy) {
-
-			struct request_t *r = &p->mem[i];
-
-			r->easy = curl_easy_init();
-			if (r->easy == NULL)
-				return NULL;
-
-			++r->curl_ctx->stat.active_requests;
-			r->pool.busy = true;
-
-			return r;
-		}
-	}
-
-	return NULL;
-}
-
 void
-request_pool_free_request(struct request_pool_t *p, struct request_t *r)
+curl_request_pool_free_request(struct curl_request_pool_t *p,
+		struct curl_request_t *r)
 {
 	if (r == NULL || p->mem == NULL)
 		return;
 
 	if (r->pool.busy) {
-		--r->curl_ctx->stat.active_requests;
-		curl_multi_remove_handle(r->curl_ctx->multi, r->easy);
+		--r->internal_ctx->stat.active_requests;
+		curl_multi_remove_handle(r->internal_ctx->multi, r->easy);
 	}
 
-	reset_request(r);
+	curl_request_reset(r);
 }
 
 size_t
-request_pool_get_free_size(struct request_pool_t *p)
+curl_request_pool_get_free_size(struct curl_request_pool_t *p)
 {
 	size_t size = 0;
 
