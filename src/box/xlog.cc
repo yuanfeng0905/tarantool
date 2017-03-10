@@ -129,7 +129,8 @@ enum {
 	XLOG_META_LEN_MAX = 1024 + VCLOCK_STR_LEN_MAX
 };
 
-#define SERVER_UUID_KEY "Server"
+#define INSTANCE_UUID_KEY "Instance"
+#define INSTANCE_UUID_KEY_V12 "Server"
 #define VCLOCK_KEY "VClock"
 
 static const char v13[] = "0.13";
@@ -153,10 +154,10 @@ xlog_meta_format(const struct xlog_meta *meta, char *buf, int size)
 	char *vstr = vclock_to_string(&meta->vclock);
 	if (vstr == NULL)
 		return -1;
-	char *server_uuid = tt_uuid_str(&meta->server_uuid);
-	int total = snprintf(buf, size, "%s\n%s\n" SERVER_UUID_KEY ": "
+	char *instance_uuid = tt_uuid_str(&meta->instance_uuid);
+	int total = snprintf(buf, size, "%s\n%s\n" INSTANCE_UUID_KEY ": "
 		"%s\n" VCLOCK_KEY ": %s\n\n",
-		 meta->filetype, v13, server_uuid, vstr);
+		 meta->filetype, v13, instance_uuid, vstr);
 	assert(total > 0);
 	free(vstr);
 	return total;
@@ -237,19 +238,20 @@ xlog_meta_parse(struct xlog_meta *meta, const char **data,
 		assert(val <= val_end);
 		pos = eol + 1;
 
-		if (memcmp(key, SERVER_UUID_KEY, key_end - key) == 0) {
+		if (memcmp(key, INSTANCE_UUID_KEY, key_end - key) == 0 ||
+		    memcmp(key, INSTANCE_UUID_KEY_V12, key_end - key) == 0) {
 			/*
-			 * Server: <uuid>
+			 * Instance: <uuid>
 			 */
 			if (val_end - val != UUID_STR_LEN) {
-				tnt_error(XlogError, "can't parse node UUID");
+				tnt_error(XlogError, "can't parse instance UUID");
 				return -1;
 			}
 			char uuid[UUID_STR_LEN + 1];
 			memcpy(uuid, val, UUID_STR_LEN);
 			uuid[UUID_STR_LEN] = '\0';
-			if (tt_uuid_from_string(uuid, &meta->server_uuid) != 0) {
-				tnt_error(XlogError, "can't parse node UUID");
+			if (tt_uuid_from_string(uuid, &meta->instance_uuid) != 0) {
+				tnt_error(XlogError, "can't parse instance UUID");
 				return -1;
 			}
 		} else if (memcmp(key, VCLOCK_KEY, key_end - key) == 0){
@@ -290,19 +292,18 @@ xlog_meta_parse(struct xlog_meta *meta, const char **data,
 
 void
 xdir_create(struct xdir *dir, const char *dirname,
-	    enum xdir_type type, const tt_uuid *server_uuid)
+	    enum xdir_type type, const tt_uuid *instance_uuid)
 {
 	memset(dir, 0, sizeof(*dir));
 	vclockset_new(&dir->index);
 	/* Default mode. */
 	dir->mode = 0660;
-	dir->server_uuid = server_uuid;
+	dir->instance_uuid = instance_uuid;
 	snprintf(dir->dirname, PATH_MAX, "%s", dirname);
 	dir->open_wflags = O_RDWR | O_CREAT | O_EXCL;
 	if (type == SNAP) {
 		dir->filetype = "SNAP";
 		dir->filename_ext = ".snap";
-		dir->panic_if_error = true;
 		dir->suffix = INPROGRESS;
 		dir->sync_interval = SNAP_SYNC_INTERVAL;
 	} else {
@@ -310,6 +311,7 @@ xdir_create(struct xdir *dir, const char *dirname,
 		dir->filetype = "XLOG";
 		dir->filename_ext = ".xlog";
 		dir->suffix = NONE;
+		dir->force_recovery = true;
 	}
 	dir->type = type;
 }
@@ -409,10 +411,10 @@ xdir_open_cursor(struct xdir *dir, int64_t signature,
 			 dir->filetype, meta->filetype);
 		return -1;
 	}
-	if (!tt_uuid_is_nil(dir->server_uuid) &&
-	    !tt_uuid_is_equal(dir->server_uuid, &meta->server_uuid)) {
+	if (!tt_uuid_is_nil(dir->instance_uuid) &&
+	    !tt_uuid_is_equal(dir->instance_uuid, &meta->instance_uuid)) {
 		xlog_cursor_close(cursor, false);
-		tnt_error(XlogError, "%s: invalid server UUID", filename);
+		tnt_error(XlogError, "%s: invalid instance UUID", filename);
 		return -1;
 	}
 	/*
@@ -445,7 +447,7 @@ cmp_i64(const void *_a, const void *_b)
  * The name of the file is based on its vclock signature,
  * which is the sum of all elements in the vector clock recorded
  * when the file was created. Elements in the vector
- * reflect log sequence numbers of servers in the asynchronous
+ * reflect log sequence numbers of replicas in the asynchronous
  * replication set (see also _cluster system space and vclock.h
  * comments).
  *
@@ -456,16 +458,16 @@ cmp_i64(const void *_a, const void *_b)
  * directory to discover newly created logs.
  *
  * On error, this function throws an exception. If
- * dir->panic_if_error is false, *some* errors are not
+ * dir->force_recovery is true, *some* errors are not
  * propagated up but only logged in the error log file.
  *
- * The list of errors ignored in panic_if_error = false mode
+ * The list of errors ignored in force_recovery = true mode
  * includes:
  * - a file can not be opened
  * - some of the files have incorrect metadata (such files are
  *   skipped)
  *
- * The goal of panic_if_error = false mode is partial recovery
+ * The goal of force_recovery = true mode is partial recovery
  * from a damaged/incorrect data directory. It doesn't
  * silence conditions such as out of memory or lack of OS
  * resources.
@@ -565,10 +567,10 @@ xdir_scan(struct xdir *dir)
 			/** Add a new file. */
 			if (xdir_index_file(dir, s_new) != 0) {
 				/*
-				 * panic_if_error must not affect OOM
+				 * force_recovery must not affect OOM
 				 */
 				struct error *e = diag_last_error(&fiber()->diag);
-				if (dir->panic_if_error ||
+				if (!dir->force_recovery ||
 				    type_cast(OutOfMemory, e))
 					return -1;
 				/** Skip a corrupted file */
@@ -801,7 +803,7 @@ err:
 }
 
 /**
- * In case of error, writes a message to the server log
+ * In case of error, writes a message to the error log
  * and sets errno.
  */
 int
@@ -812,7 +814,7 @@ xdir_create_xlog(struct xdir *dir, struct xlog *xlog,
 	int64_t signature = vclock_sum(vclock);
 	struct xlog_meta meta;
 	assert(signature >= 0);
-	assert(!tt_uuid_is_nil(dir->server_uuid));
+	assert(!tt_uuid_is_nil(dir->instance_uuid));
 
 	/*
 	* Check whether a file with this name already exists.
@@ -822,7 +824,7 @@ xdir_create_xlog(struct xdir *dir, struct xlog *xlog,
 
 	/* Setup inherited values */
 	snprintf(meta.filetype, sizeof(meta.filetype), "%s", dir->filetype);
-	meta.server_uuid = *dir->server_uuid;
+	meta.instance_uuid = *dir->instance_uuid;
 	vclock_copy(&meta.vclock, vclock);
 
 	if (xlog_create(xlog, filename, &meta) != 0)
@@ -1663,7 +1665,7 @@ xlog_cursor_next_row(struct xlog_cursor *cursor, struct xrow_header *xrow)
 
 int
 xlog_cursor_next(struct xlog_cursor *cursor,
-		 struct xrow_header *xrow, bool panic_if_error)
+		 struct xrow_header *xrow, bool force_recovery)
 {
 	while (true) {
 		int rc;
@@ -1672,14 +1674,14 @@ xlog_cursor_next(struct xlog_cursor *cursor,
 			break;
 		if (rc < 0) {
 			struct error *e = diag_last_error(diag_get());
-			if (panic_if_error ||
+			if (!force_recovery ||
 			    e->type != &type_XlogError)
 				return -1;
 			say_error("can't decode row: %s", e->errmsg);
 		}
 		while ((rc = xlog_cursor_next_tx(cursor)) < 0) {
 			struct error *e = diag_last_error(diag_get());
-			if (panic_if_error ||
+			if (!force_recovery ||
 			    e->type != &type_XlogError)
 				return -1;
 			say_error("can't open tx: %s", e->errmsg);

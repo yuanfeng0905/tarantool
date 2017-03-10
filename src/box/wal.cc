@@ -44,6 +44,16 @@ const char *wal_mode_STRS[] = { "none", "write", "fsync", NULL };
 
 int wal_dir_lock = -1;
 
+/* WAL thread. */
+struct wal_thread {
+	/** 'wal' thread doing the writes. */
+	struct cord cord;
+	/** A pipe from 'tx' thread to 'wal' */
+	struct cpipe wal_pipe;
+	/** Return pipe from 'wal' to tx' */
+	struct cpipe tx_pipe;
+};
+
 /*
  * WAL writer - maintain a Write Ahead Log for every change
  * in the data state.
@@ -62,19 +72,13 @@ struct wal_writer
 	 * the wal-tx bus and are rolled back "on arrival".
 	 */
 	struct stailq rollback;
-	/** A pipe from 'tx' thread to 'wal' */
-	struct cpipe wal_pipe;
 	/* ----------------- wal ------------------- */
-	/** A setting from server configuration - rows_per_wal */
+	/** A setting from instance configuration - rows_per_wal */
 	int64_t rows_per_wal;
 	/** Another one - wal_mode */
 	enum wal_mode wal_mode;
 	/** wal_dir, from the configuration file. */
 	struct xdir wal_dir;
-	/** 'wal' thread doing the writes. */
-	struct cord cord;
-	/** WAL writer thread's main fiber, saved to be able to stop it. */
-	struct fiber *main_f;
 	/**
 	 * The vector clock of the WAL writer. It's a bit behind
 	 * the vector clock of the transaction thread, since it
@@ -87,8 +91,6 @@ struct wal_writer
 	 * with this LSN and LSN becomes "real".
 	 */
 	struct vclock vclock;
-	/** Return pipe from 'wal' to tx' */
-	struct cpipe tx_pipe;
 	/** The current WAL file. */
 	struct xlog current_wal;
 	/** true if wal file is opened */
@@ -119,6 +121,7 @@ struct wal_msg: public cmsg {
 	struct stailq rollback;
 };
 
+static struct wal_thread wal_thread;
 static struct wal_writer wal_writer_singleton;
 
 struct wal_writer *wal = NULL;
@@ -131,7 +134,7 @@ static void
 tx_schedule_commit(struct cmsg *msg);
 
 static struct cmsg_hop wal_request_route[] = {
-	{wal_write_to_disk, &wal_writer_singleton.tx_pipe},
+	{wal_write_to_disk, &wal_thread.tx_pipe},
 	{tx_schedule_commit, NULL},
 };
 
@@ -216,17 +219,16 @@ tx_schedule_rollback(struct cmsg *msg)
  */
 static void
 wal_writer_create(struct wal_writer *writer, enum wal_mode wal_mode,
-		  const char *wal_dirname, const struct tt_uuid *server_uuid,
+		  const char *wal_dirname, const struct tt_uuid *instance_uuid,
 		  struct vclock *vclock, int64_t rows_per_wal)
 {
 	writer->wal_mode = wal_mode;
 	writer->rows_per_wal = rows_per_wal;
 
-	xdir_create(&writer->wal_dir, wal_dirname, XLOG, server_uuid);
+	xdir_create(&writer->wal_dir, wal_dirname, XLOG, instance_uuid);
 	writer->is_active = false;
 	if (wal_mode == WAL_FSYNC)
 		writer->wal_dir.open_wflags |= O_SYNC;
-	cpipe_set_max_input(&writer->wal_pipe, IOV_MAX);
 
 	stailq_create(&writer->rollback);
 	cmsg_init(&writer->in_rollback, NULL);
@@ -247,68 +249,64 @@ wal_writer_destroy(struct wal_writer *writer)
 	tt_pthread_mutex_destroy(&writer->watchers_mutex);
 }
 
-/** WAL writer thread routine. */
+/** WAL thread routine. */
 static int
-wal_writer_f(va_list ap);
+wal_thread_f(va_list ap);
 
-/* Rotate the WAL. */
-static int
-wal_opt_rotate(struct wal_writer *writer);
+/** Start WAL thread and setup pipes to and from TX. */
+void
+wal_thread_start()
+{
+	if (cord_costart(&wal_thread.cord, "wal", wal_thread_f, NULL) != 0)
+		panic("failed to start WAL thread");
+
+	/* Create a pipe to WAL thread. */
+	cpipe_create(&wal_thread.wal_pipe, "wal");
+	cpipe_set_max_input(&wal_thread.wal_pipe, IOV_MAX);
+}
 
 /**
- * Initialize WAL writer, start the thread.
+ * Initialize WAL writer.
  *
- * @pre   The server has completed recovery from a snapshot
+ * @pre   The instance has completed recovery from a snapshot
  *        and/or existing WALs. All WALs opened in read-only
- *        mode are closed.
- *
- * @param state			WAL writer meta-data.
- *
- * @return 0 success, -1 on error. On success, recovery->writer
- *         points to a newly created WAL writer.
+ *        mode are closed. WAL thread has been started.
  */
 void
-wal_writer_start(enum wal_mode wal_mode, const char *wal_dirname,
-		 const struct tt_uuid *server_uuid, struct vclock *vclock,
-		 int64_t rows_per_wal)
+wal_init(enum wal_mode wal_mode, const char *wal_dirname,
+	 const struct tt_uuid *instance_uuid, struct vclock *vclock,
+	 int64_t rows_per_wal)
 {
 	assert(rows_per_wal > 1);
 
 	struct wal_writer *writer = &wal_writer_singleton;
 
-	/* I. Initialize the state. */
-	wal_writer_create(writer, wal_mode, wal_dirname, server_uuid,
-			vclock, rows_per_wal);
+	wal_writer_create(writer, wal_mode, wal_dirname, instance_uuid,
+			  vclock, rows_per_wal);
 
-	/* II. Start the thread. */
-
-	if (cord_costart(&writer->cord, "wal", wal_writer_f, writer)) {
-		wal_writer_destroy(writer);
-		wal = NULL;
-		panic("failed to start WAL thread");
-	}
-	/* Create a pipe to WAL thread. */
-	cpipe_create(&wal_writer_singleton.wal_pipe, "wal");
 	wal = writer;
 }
 
-/** Stop and destroy the writer thread (at shutdown). */
+/**
+ * Stop WAL thread, wait until it exits, and destroy WAL writer
+ * if it was initialized. Called on shutdown.
+ */
 void
-wal_writer_stop()
+wal_thread_stop()
 {
-	struct wal_writer *writer = wal;
+	cbus_stop_loop(&wal_thread.wal_pipe);
 
-	cbus_stop_loop(&writer->wal_pipe);
-
-	if (cord_join(&writer->cord)) {
+	if (cord_join(&wal_thread.cord)) {
 		/* We can't recover from this in any reasonable way. */
 		panic_syserror("WAL writer: thread join failed");
 	}
 
-	wal_writer_destroy(writer);
+	if (wal != NULL) {
+		wal_writer_destroy(wal);
+		wal = NULL;
+	}
 
 	rmean_tx_wal_bus = NULL;
-	wal = NULL;
 }
 
 struct wal_checkpoint: public cmsg
@@ -348,10 +346,10 @@ wal_checkpoint_done_f(struct cmsg *data)
 }
 
 void
-wal_checkpoint(struct wal_writer *writer, struct vclock *vclock, bool rotate)
+wal_checkpoint(struct vclock *vclock, bool rotate)
 {
 	static struct cmsg_hop wal_checkpoint_route[] = {
-		{wal_checkpoint_f, &wal_writer_singleton.tx_pipe},
+		{wal_checkpoint_f, &wal_thread.tx_pipe},
 		{wal_checkpoint_done_f, NULL},
 	};
 	vclock_create(vclock);
@@ -360,7 +358,7 @@ wal_checkpoint(struct wal_writer *writer, struct vclock *vclock, bool rotate)
 	msg.vclock = vclock;
 	msg.fiber = fiber();
 	msg.rotate = rotate;
-	cpipe_push(&writer->wal_pipe, &msg);
+	cpipe_push(&wal_thread.wal_pipe, &msg);
 	fiber_set_cancellable(false);
 	fiber_yield();
 	fiber_set_cancellable(true);
@@ -392,8 +390,7 @@ wal_opt_rotate(struct wal_writer *writer)
 		/*
 		 * We can not handle xlog_close()
 		 * failure in any reasonable way.
-		 * A warning is written to the server
-		 * log file.
+		 * A warning is written to the error log.
 		 */
 		xlog_close(&writer->current_wal, false);
 		writer->is_active = false;
@@ -438,14 +435,14 @@ wal_writer_begin_rollback(struct wal_writer *writer)
 		 * valve is closed by non-empty writer->rollback
 		 * list.
 		 */
-		{ wal_writer_clear_bus, &wal_writer_singleton.wal_pipe },
-		{ wal_writer_clear_bus, &wal_writer_singleton.tx_pipe },
+		{ wal_writer_clear_bus, &wal_thread.wal_pipe },
+		{ wal_writer_clear_bus, &wal_thread.tx_pipe },
 		/*
 		 * Step 2: writer->rollback queue contains all
 		 * messages which need to be rolled back,
 		 * perform the rollback.
 		 */
-		{ tx_schedule_rollback, &wal_writer_singleton.wal_pipe },
+		{ tx_schedule_rollback, &wal_thread.wal_pipe },
 		/*
 		 * Step 3: re-open the WAL for writing.
 		 */
@@ -457,7 +454,7 @@ wal_writer_begin_rollback(struct wal_writer *writer)
 	 * all input until rollback mode is off.
 	 */
 	cmsg_init(&writer->in_rollback, rollback_route);
-	cpipe_push(&writer->tx_pipe, &writer->in_rollback);
+	cpipe_push(&wal_thread.tx_pipe, &writer->in_rollback);
 }
 
 static void
@@ -560,7 +557,7 @@ done:
 
 		/* Update internal vclock */
 		vclock_follow(&writer->vclock,
-			      req->rows[req->n_rows - 1]->server_id,
+			      req->rows[req->n_rows - 1]->replica_id,
 			      req->rows[req->n_rows - 1]->lsn);
 		/* Update row counter for wal_opt_rotate() */
 		l->rows += req->n_rows;
@@ -576,30 +573,31 @@ done:
 	wal_notify_watchers(writer);
 }
 
-/** WAL writer thread main loop.  */
+/** WAL thread main loop.  */
 static int
-wal_writer_f(va_list ap)
+wal_thread_f(va_list ap)
 {
-	struct wal_writer *writer = va_arg(ap, struct wal_writer *);
+	(void) ap;
+
 	/** Initialize eio in this thread */
 	coeio_enable();
 
-	writer->main_f = fiber();
 	struct cbus_endpoint endpoint;
-	cbus_join(&endpoint, "wal", fiber_schedule_cb, fiber());
+	cbus_endpoint_create(&endpoint, "wal", fiber_schedule_cb, fiber());
 	/*
 	 * Create a pipe to TX thread. Use a high priority
 	 * endpoint, to ensure that WAL messages are delivered
 	 * even when tx fiber pool is used up by net messages.
 	 */
-	cpipe_create(&wal_writer_singleton.tx_pipe, "tx_prio");
+	cpipe_create(&wal_thread.tx_pipe, "tx_prio");
 
 	cbus_loop(&endpoint);
 
-	if (writer->is_active) {
-		xlog_close(&writer->current_wal, false);
-		writer->is_active = false;
+	if (wal != NULL && wal->is_active) {
+		xlog_close(&wal->current_wal, false);
+		wal->is_active = false;
 	}
+	cpipe_destroy(&wal_thread.tx_pipe);
 	return 0;
 }
 
@@ -608,8 +606,9 @@ wal_writer_f(va_list ap)
  * to be written to disk and wait until this task is completed.
  */
 int64_t
-wal_write(struct wal_writer *writer, struct wal_request *req)
+wal_write(struct wal_request *req)
 {
+	struct wal_writer *writer = wal;
 	ERROR_INJECT_RETURN(ERRINJ_WAL_IO);
 
 	if (! stailq_empty(&writer->rollback)) {
@@ -630,8 +629,8 @@ wal_write(struct wal_writer *writer, struct wal_request *req)
 	req->res = -1;
 
 	struct wal_msg *batch;
-	if (!stailq_empty(&writer->wal_pipe.input) &&
-	    (batch = wal_msg(stailq_first_entry(&writer->wal_pipe.input,
+	if (!stailq_empty(&wal_thread.wal_pipe.input) &&
+	    (batch = wal_msg(stailq_first_entry(&wal_thread.wal_pipe.input,
 						struct cmsg, fifo)))) {
 
 		stailq_add_tail_entry(&batch->commit, req, fifo);
@@ -646,10 +645,10 @@ wal_write(struct wal_writer *writer, struct wal_request *req)
 		 * thread right away.
 		 */
 		stailq_add_tail_entry(&batch->commit, req, fifo);
-		cpipe_push(&writer->wal_pipe, batch);
+		cpipe_push(&wal_thread.wal_pipe, batch);
 	}
-	writer->wal_pipe.n_input += req->n_rows * XROW_IOVMAX;
-	cpipe_flush_input(&writer->wal_pipe);
+	wal_thread.wal_pipe.n_input += req->n_rows * XROW_IOVMAX;
+	cpipe_flush_input(&wal_thread.wal_pipe);
 	/**
 	 * It's not safe to spuriously wakeup this fiber
 	 * since in that case it will ignore a possible
@@ -663,9 +662,9 @@ wal_write(struct wal_writer *writer, struct wal_request *req)
 }
 
 int
-wal_set_watcher(struct wal_writer *writer, struct wal_watcher *watcher,
-		struct ev_async *async)
+wal_set_watcher(struct wal_watcher *watcher, struct ev_async *async)
 {
+	struct wal_writer *writer = wal;
 
 	if (writer == NULL)
 		return -1;
@@ -679,8 +678,9 @@ wal_set_watcher(struct wal_writer *writer, struct wal_watcher *watcher,
 }
 
 void
-wal_clear_watcher(struct wal_writer *writer, struct wal_watcher *watcher)
+wal_clear_watcher(struct wal_watcher *watcher)
 {
+	struct wal_writer *writer = wal;
 	if (writer == NULL)
 		return;
 

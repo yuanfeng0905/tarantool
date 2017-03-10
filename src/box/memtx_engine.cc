@@ -42,7 +42,7 @@
 #include "xrow.h"
 #include "xstream.h"
 #include "bootstrap.h"
-#include "cluster.h"
+#include "replication.h"
 #include "schema.h"
 
 /** For all memory used by all indexes.
@@ -117,31 +117,22 @@ memtx_build_secondary_keys(struct space *space, void *param)
 	handler->replace = memtx_replace_all_keys;
 }
 
-MemtxEngine::MemtxEngine(const char *snap_dirname, bool panic_on_snap_error,
-			 bool panic_on_wal_error,
-			 float tuple_arena_max_size, uint32_t objsize_min,
+MemtxEngine::MemtxEngine(const char *snap_dirname, bool force_recovery,
+			 uint64_t tuple_arena_max_size, uint32_t objsize_min,
 			 uint32_t objsize_max, float alloc_factor)
 	:Engine("memtx", &memtx_tuple_format_vtab),
 	m_checkpoint(0),
 	m_state(MEMTX_INITIALIZED),
 	m_snap_io_rate_limit(0),
-	m_panic_on_wal_error(panic_on_wal_error)
+	m_force_recovery(force_recovery)
 {
 	memtx_tuple_init(tuple_arena_max_size, objsize_min, objsize_max,
 			 alloc_factor);
 
 	flags = ENGINE_CAN_BE_TEMPORARY;
-	xdir_create(&m_snap_dir, snap_dirname, SNAP, &SERVER_UUID);
-	m_snap_dir.panic_if_error = panic_on_snap_error;
+	xdir_create(&m_snap_dir, snap_dirname, SNAP, &INSTANCE_UUID);
+	m_snap_dir.force_recovery = force_recovery;
 	xdir_scan_xc(&m_snap_dir);
-	struct vclock *vclock = vclockset_last(&m_snap_dir.index);
-	if (vclock) {
-		vclock_copy(&m_last_checkpoint, vclock);
-		m_has_checkpoint = true;
-	} else {
-		vclock_create(&m_last_checkpoint);
-		m_has_checkpoint = false;
-	}
 }
 
 MemtxEngine::~MemtxEngine()
@@ -154,31 +145,26 @@ MemtxEngine::~MemtxEngine()
 int64_t
 MemtxEngine::lastCheckpoint(struct vclock *vclock)
 {
-	if (!m_has_checkpoint)
-		return -1;
-	assert(vclock);
-	vclock_copy(vclock, &m_last_checkpoint);
-	/* Return the lsn of the last checkpoint. */
-	return vclock->signature;
+	return xdir_last_vclock(&m_snap_dir, vclock);
 }
 
 void
 MemtxEngine::recoverSnapshot()
 {
-	if (!m_has_checkpoint)
+	struct vclock vclock;
+	if (lastCheckpoint(&vclock) < 0)
 		return;
 
 	/* Process existing snapshot */
 	say_info("recovery start");
-	assert(m_has_checkpoint);
-	int64_t signature = m_last_checkpoint.signature;
+	int64_t signature = vclock.signature;
 	const char *filename = xdir_format_filename(&m_snap_dir, signature,
 						    NONE);
 
 	say_info("recovering from `%s'", filename);
 	struct xlog_cursor cursor;
 	xlog_cursor_open_xc(&cursor, filename);
-	SERVER_UUID = cursor.meta.server_uuid;
+	INSTANCE_UUID = cursor.meta.instance_uuid;
 	auto reader_guard = make_scoped_guard([&]{
 		xlog_cursor_close(&cursor, false);
 	});
@@ -186,11 +172,11 @@ MemtxEngine::recoverSnapshot()
 	struct xrow_header row;
 	uint64_t row_count = 0;
 	while (xlog_cursor_next_xc(&cursor, &row,
-				   m_snap_dir.panic_if_error) == 0) {
+				   m_snap_dir.force_recovery) == 0) {
 		try {
 			recoverSnapshotRow(&row);
 		} catch (ClientError *e) {
-			if (m_snap_dir.panic_if_error)
+			if (!m_snap_dir.force_recovery)
 				throw;
 			say_error("can't apply row: ");
 			e->log();
@@ -247,12 +233,12 @@ MemtxEngine::beginInitialRecovery(struct vclock *vclock)
 	 * from the snapshot, in which they are stored in key
 	 * order, and bulk build of the primary key.
 	 *
-	 * If panic_on_snap_error = false, it's a disaster
+	 * If force_recovery = true, it's a disaster
 	 * recovery mode. Enable all keys on start, to detect and
 	 * discard duplicates in the snapshot.
 	 */
-	m_state = (m_snap_dir.panic_if_error ?
-		   MEMTX_INITIAL_RECOVERY : MEMTX_OK);
+	m_state = (m_snap_dir.force_recovery?
+		   MEMTX_OK : MEMTX_INITIAL_RECOVERY);
 }
 
 void
@@ -265,7 +251,7 @@ MemtxEngine::beginFinalRecovery()
 	/* End of the fast path: loaded the primary key. */
 	space_foreach(memtx_end_build_primary_key, this);
 
-	if (m_panic_on_wal_error) {
+	if (!m_force_recovery) {
 		/*
 		 * Fast start path: "play out" WAL
 		 * records using the primary key only,
@@ -274,7 +260,7 @@ MemtxEngine::beginFinalRecovery()
 		m_state = MEMTX_FINAL_RECOVERY;
 	} else {
 		/*
-		 * If panic_on_wal_error = false, it's
+		 * If force_recovery = true, it's
 		 * a disaster recovery mode. Build
 		 * secondary keys before reading the WAL,
 		 * to detect and discard duplicates in
@@ -290,8 +276,8 @@ MemtxEngine::endRecovery()
 {
 	/*
 	 * Recovery is started with enabled keys when:
-	 * - either of panic_on_snap_error/panic_on_wal_error
-	 *   is true
+	 * - either of force_recovery
+	 *   is false
 	 * - it's a replication join
 	 */
 	if (m_state != MEMTX_OK) {
@@ -610,7 +596,7 @@ checkpoint_write_row(struct xlog *l, struct xrow_header *row)
 	}
 
 	row->tm = last;
-	row->server_id = 0;
+	row->replica_id = 0;
 	/**
 	 * Rows in snapshot are numbered from 1 to %rows.
 	 * This makes streaming such rows to a replica or
@@ -671,7 +657,7 @@ struct checkpoint {
 	struct cord cord;
 	bool waiting_for_snap_thread;
 	/** The vclock of the snapshot file. */
-	struct vclock vclock;
+	struct vclock *vclock;
 	struct xdir dir;
 };
 
@@ -681,10 +667,14 @@ checkpoint_init(struct checkpoint *ckpt, const char *snap_dirname,
 {
 	ckpt->entries = RLIST_HEAD_INITIALIZER(ckpt->entries);
 	ckpt->waiting_for_snap_thread = false;
-	xdir_create(&ckpt->dir, snap_dirname, SNAP, &SERVER_UUID);
+	xdir_create(&ckpt->dir, snap_dirname, SNAP, &INSTANCE_UUID);
 	ckpt->snap_io_rate_limit = snap_io_rate_limit;
 	/* May be used in abortCheckpoint() */
-	vclock_create(&ckpt->vclock);
+	ckpt->vclock = (struct vclock *) malloc(sizeof(*ckpt->vclock));
+	if (ckpt->vclock == NULL)
+		tnt_raise(OutOfMemory, sizeof(*ckpt->vclock),
+			  "malloc", "vclock");
+	vclock_create(ckpt->vclock);
 }
 
 static void
@@ -698,6 +688,7 @@ checkpoint_destroy(struct checkpoint *ckpt)
 	}
 	ckpt->entries = RLIST_HEAD_INITIALIZER(ckpt->entries);
 	xdir_destroy(&ckpt->dir);
+	free(ckpt->vclock);
 }
 
 
@@ -729,7 +720,7 @@ checkpoint_f(va_list ap)
 	struct checkpoint *ckpt = va_arg(ap, struct checkpoint *);
 
 	struct xlog snap;
-	if (xdir_create_xlog(&ckpt->dir, &snap, &ckpt->vclock) != 0)
+	if (xdir_create_xlog(&ckpt->dir, &snap, ckpt->vclock) != 0)
 		diag_raise();
 
 	auto guard = make_scoped_guard([&]{ xlog_close(&snap, false); });
@@ -770,7 +761,7 @@ MemtxEngine::waitCheckpoint(struct vclock *vclock)
 {
 	assert(m_checkpoint);
 
-	vclock_copy(&m_checkpoint->vclock, vclock);
+	vclock_copy(m_checkpoint->vclock, vclock);
 
 	if (cord_costart(&m_checkpoint->cord, "snapshot",
 			 checkpoint_f, m_checkpoint)) {
@@ -798,7 +789,7 @@ MemtxEngine::commitCheckpoint(struct vclock *vclock)
 
 	memtx_tuple_end_snapshot();
 
-	int64_t lsn = vclock_sum(&m_checkpoint->vclock);
+	int64_t lsn = vclock_sum(m_checkpoint->vclock);
 	struct xdir *dir = &m_checkpoint->dir;
 	/* rename snapshot on completion */
 	char to[PATH_MAX];
@@ -809,8 +800,8 @@ MemtxEngine::commitCheckpoint(struct vclock *vclock)
 	if (rc != 0)
 		panic("can't rename .snap.inprogress");
 
-	vclock_copy(&m_last_checkpoint, &m_checkpoint->vclock);
-	m_has_checkpoint = true;
+	xdir_add_vclock(&m_snap_dir, m_checkpoint->vclock);
+	m_checkpoint->vclock = NULL;
 	checkpoint_destroy(m_checkpoint);
 	m_checkpoint = 0;
 }
@@ -833,7 +824,7 @@ MemtxEngine::abortCheckpoint()
 	/** Remove garbage .inprogress file. */
 	char *filename =
 		xdir_format_filename(&m_checkpoint->dir,
-				     vclock_sum(&m_checkpoint->vclock),
+				     vclock_sum(m_checkpoint->vclock),
 				     INPROGRESS);
 	(void) coeio_unlink(filename);
 
@@ -861,10 +852,10 @@ memtx_initial_join_f(va_list ap)
 
 	struct xdir dir;
 	/*
-	 * snap_dirname and SERVER_UUID don't change after start,
+	 * snap_dirname and INSTANCE_UUID don't change after start,
 	 * safe to use in another thread.
 	 */
-	xdir_create(&dir, snap_dirname, SNAP, &SERVER_UUID);
+	xdir_create(&dir, snap_dirname, SNAP, &INSTANCE_UUID);
 	auto guard = make_scoped_guard([&]{
 		xdir_destroy(&dir);
 	});
@@ -900,7 +891,8 @@ MemtxEngine::join(struct xstream *stream)
 	 * as a replica. Our best effort is to not crash in such
 	 * case: raise ER_MISSING_SNAPSHOT.
 	 */
-	if (!m_has_checkpoint)
+	struct vclock vclock;
+	if (lastCheckpoint(&vclock) < 0)
 		tnt_raise(ClientError, ER_MISSING_SNAPSHOT);
 
 	/*
@@ -908,7 +900,7 @@ MemtxEngine::join(struct xstream *stream)
 	 */
 	struct memtx_join_arg arg = {
 		/* .snap_dirname   = */ m_snap_dir.dirname,
-		/* .checkpoint_lsn = */ vclock_sum(&m_last_checkpoint),
+		/* .checkpoint_lsn = */ vclock_sum(&vclock),
 		/* .stream         = */ stream
 	};
 

@@ -70,7 +70,7 @@
 #include "tuple_update.h"
 #include "txn.h" /* box_txn_alloc() */
 #include "iproto_constants.h"
-#include "cluster.h" /* SERVER_UUID */
+#include "replication.h" /* INSTANCE_UUID */
 #include "vclock.h"
 #include "schema.h"
 #include "xrow.h"
@@ -92,6 +92,15 @@ struct vy_scheduler;
 struct vy_task;
 struct vy_stat;
 struct vy_squash_queue;
+
+enum vy_status {
+	VINYL_OFFLINE,
+	VINYL_INITIAL_RECOVERY_LOCAL,
+	VINYL_INITIAL_RECOVERY_REMOTE,
+	VINYL_FINAL_RECOVERY_LOCAL,
+	VINYL_FINAL_RECOVERY_REMOTE,
+	VINYL_ONLINE,
+};
 
 /**
  * Global configuration of an entire vinyl instance (env object).
@@ -341,7 +350,8 @@ vy_stat_tx_write_rate(struct vy_stat *s)
  * @param upsert         An UPSERT statement.
  * @param object         An REPLACE/DELETE/UPSERT statement or NULL.
  * @param key_def        Key definition of an index.
- * @param format         Tuple format of the index.
+ * @param format         Format for REPLACE/DELETE tuples.
+ * @param upsert_format  Format for UPSERT tuples.
  * @param suppress_error True if ClientErrors must not be written to log.
  *
  * @retval NULL     Memory allocation error.
@@ -350,7 +360,7 @@ vy_stat_tx_write_rate(struct vy_stat *s)
 static struct tuple *
 vy_apply_upsert(const struct tuple *upsert, const struct tuple *object,
 		const struct key_def *key_def, struct tuple_format *format,
-		bool suppress_error);
+		struct tuple_format *upsert_format, bool suppress_error);
 
 /**
  * Run metadata. A run is a written to a file as a single
@@ -628,6 +638,25 @@ struct vy_index {
 	 * are parts of an UPDATE operation.
 	 */
 	struct tuple_format *space_format_with_colmask;
+	/**
+	 * A format of the space of this index. It is need as the
+	 * separate member, because there is a case, when the
+	 * index is dropped, but we still need the format of the
+	 * space.
+	 */
+	struct tuple_format *space_format;
+	/**
+	 * Count of indexes in the space. This member is need by
+	 * the same reason, as the previous - we need to know the
+	 * count of indexes was in the space, that maybe already
+	 * was deleted.
+	 */
+	uint32_t space_index_count;
+	/*
+	 * Format for UPSERT statements. Note, that UPSERTs can
+	 * appear only in spaces with a single primary index.
+	 */
+	struct tuple_format *upsert_format;
 
 	/** Member of env->indexes. */
 	struct rlist link;
@@ -705,12 +734,6 @@ enum tx_state {
 	VINYL_TX_ROLLBACK
 };
 
-/** Transaction type. */
-enum tx_type {
-	VINYL_TX_RO,
-	VINYL_TX_RW
-};
-
 struct read_set_key {
 	struct tuple *stmt;
 	int64_t tsn;
@@ -735,7 +758,6 @@ struct vy_tx {
 	 */
 	uint32_t write_set_version;
 	ev_tstamp start;
-	enum tx_type type;
 	enum tx_state state;
 	/**
 	 * The transaction is forbidden to commit unless it's read-only.
@@ -806,11 +828,10 @@ struct vy_merge_iterator {
 	uint32_t skipped_start;
 	/* Index for key_def and index->version */
 	struct vy_index *index;
-	/**
-	 * Format to allocate tuples
-	 * (from vy_apply_upsert(), run_iterator and mem_iterator)
-	 */
+	/** Format to allocate REPLACE and DELETE tuples. */
 	struct tuple_format *format;
+	/** Format to allocate UPSERT tuples. */
+	struct tuple_format *upsert_format;
 
 	/* {{{ Range version checking */
 	/* copy of index->version to track range tree changes */
@@ -1070,8 +1091,7 @@ rb_gen(MAYBE_UNUSED static inline, tx_tree_, tx_tree_t, struct vy_tx,
 
 struct tx_manager {
 	tx_tree_t tree;
-	uint32_t count_rd;
-	uint32_t count_rw;
+	uint32_t count_tx;
 	/** Transaction logical time. */
 	int64_t tsn;
 	/**
@@ -1180,8 +1200,7 @@ write_set_search_key(write_set_t *tree, struct vy_index *index,
 static bool
 vy_tx_is_ro(struct vy_tx *tx)
 {
-	return tx->type == VINYL_TX_RO ||
-		tx->write_set.rbt_root == &tx->write_set.rbt_nil;
+	return tx->write_set.rbt_root == &tx->write_set.rbt_nil;
 }
 
 static struct tx_manager *
@@ -1193,8 +1212,7 @@ tx_manager_new(struct vy_env *env)
 		return NULL;
 	}
 	tx_tree_new(&m->tree);
-	m->count_rd = 0;
-	m->count_rw = 0;
+	m->count_tx = 0;
 	m->tsn = 0;
 	m->lsn = 0;
 	m->vlsn = INT64_MAX;
@@ -1237,7 +1255,7 @@ read_set_delete_cb(read_set_t *t, struct txv *v, void *arg)
 }
 
 static void
-vy_tx_begin(struct tx_manager *m, struct vy_tx *tx, enum tx_type type)
+vy_tx_begin(struct tx_manager *m, struct vy_tx *tx)
 {
 	stailq_create(&tx->log);
 	write_set_new(&tx->write_set);
@@ -1245,24 +1263,14 @@ vy_tx_begin(struct tx_manager *m, struct vy_tx *tx, enum tx_type type)
 	tx->start = ev_now(loop());
 	tx->manager = m;
 	tx->state = VINYL_TX_READY;
-	tx->type = type;
 	tx->is_aborted = false;
 	rlist_create(&tx->cursors);
 
 	tx->tsn = ++m->tsn;
 
-	if (type == VINYL_TX_RO) {
-		/* read-only tx obtains read view at once */
-		tx->vlsn = m->lsn;
-		tx_tree_insert(&m->tree, tx);
-		if (m->vlsn == INT64_MAX)
-			m->vlsn = tx->vlsn;
-		m->count_rd++;
-	} else {
-		/* possible read-write tx reads latest changes */
-		tx->vlsn = INT64_MAX;
-		m->count_rw++;
-	}
+	/* possible read-write tx reads latest changes */
+	tx->vlsn = INT64_MAX;
+	m->count_tx++;
 }
 
 /**
@@ -1272,7 +1280,7 @@ static int
 vy_tx_track(struct vy_tx *tx, struct vy_index *index,
 	    struct tuple *key, bool is_gap)
 {
-	if (tx->type == VINYL_TX_RO || tx->is_aborted)
+	if (tx->is_aborted)
 		return 0; /* no reason to track reads */
 	uint32_t part_count = tuple_field_count(key);
 	if (part_count >= index->key_def->part_count) {
@@ -1318,10 +1326,7 @@ tx_manager_end(struct tx_manager *m, struct vy_tx *tx)
 		if (v->is_read)
 			read_set_remove(&v->index->read_set, v);
 
-	if (tx->type == VINYL_TX_RO)
-		m->count_rd--;
-	else
-		m->count_rw--;
+	m->count_tx--;
 }
 
 static void
@@ -1986,6 +1991,9 @@ static int
 vy_run_dump_stmt(struct tuple *value, struct xlog *data_xlog,
 		 struct vy_page_info *info, const struct key_def *key_def)
 {
+	struct region *region = &fiber()->gc;
+	size_t used = region_used(region);
+
 	struct xrow_header xrow;
 	if (vy_stmt_encode(value, key_def, &xrow) != 0)
 		return -1;
@@ -1993,6 +2001,8 @@ vy_run_dump_stmt(struct tuple *value, struct xlog *data_xlog,
 	ssize_t row_size;
 	if ((row_size = xlog_write_row(data_xlog, &xrow)) < 0)
 		return -1;
+
+	region_truncate(region, used);
 
 	info->unpacked_size += row_size;
 
@@ -2239,7 +2249,7 @@ vy_run_write_data(struct vy_run *run, const char *dirpath,
 	struct xlog data_xlog;
 	struct xlog_meta meta = {
 		.filetype = XLOG_META_TYPE_RUN,
-		.server_uuid = SERVER_UUID,
+		.instance_uuid = INSTANCE_UUID,
 	};
 	if (xlog_create(&data_xlog, path, &meta) < 0)
 		return -1;
@@ -2663,7 +2673,7 @@ vy_run_write_index(struct vy_run *run, const char *dirpath)
 	struct xlog index_xlog;
 	struct xlog_meta meta = {
 		.filetype = XLOG_META_TYPE_INDEX,
-		.server_uuid = SERVER_UUID,
+		.instance_uuid = INSTANCE_UUID,
 	};
 	if (xlog_create(&index_xlog, path, &meta) < 0)
 		return -1;
@@ -2722,8 +2732,9 @@ vy_range_new(struct vy_index *index, int64_t id,
 		goto fail;
 	}
 	range->mem = vy_mem_new(index->key_def, allocator, allocator_lsn,
-				index->space->format,
-				index->space_format_with_colmask);
+				index->space_format,
+				index->space_format_with_colmask,
+				index->upsert_format);
 	if (range->mem == NULL)
 		goto fail_mem;
 	/* Allocate a new id unless specified. */
@@ -2783,28 +2794,39 @@ vy_run_recover(struct vy_run *run, const char *dir)
 	}
 
 	/* Allocate buffer for page info. */
-	run->info.page_infos = calloc(run->info.count, sizeof(struct vy_page_info));
+	run->info.page_infos = calloc(run->info.count,
+				      sizeof(struct vy_page_info));
 	if (run->info.page_infos == NULL) {
-		diag_set(OutOfMemory, run->info.count * sizeof(struct vy_page_info),
+		diag_set(OutOfMemory,
+			 run->info.count * sizeof(struct vy_page_info),
 			 "malloc", "struct vy_page_info");
 		goto fail_close;
 	}
 
-	int rc;
-	uint32_t page_no = 0;
-	while ((rc = xlog_cursor_next_row(&cursor, &xrow)) == 0) {
-		if (page_no >= run->info.count) {
-			/** To many pages in file */
-			diag_set(ClientError, ER_VINYL, "To many pages in run meta file");
+	for (uint32_t page_no = 0; page_no < run->info.count; page_no++) {
+		int rc = xlog_cursor_next_row(&cursor, &xrow);
+		if (rc != 0) {
+			if (rc > 0) {
+				/** To few pages in file */
+				diag_set(ClientError, ER_VINYL,
+					 "Too few pages in run meta file");
+			}
+			/*
+			 * Limit the count of pages to
+			 * successfully created pages.
+			 */
+			run->info.count = page_no;
 			goto fail_close;
 		}
 		struct vy_page_info *page = run->info.page_infos + page_no;
 		if (vy_page_info_decode(page, &xrow) < 0) {
-			/** Limit count of pages to successfully created pages */
+			/**
+			 * Limit the count of pages to successfully
+			 * created pages
+			 */
 			run->info.count = page_no;
 			goto fail_close;
 		}
-		++page_no;
 	}
 
 	/* We don't need to keep metadata file open any longer. */
@@ -2864,13 +2886,14 @@ vy_range_rotate_mem(struct vy_range *range, struct key_def *key_def,
 	struct vy_index *index = range->index;
 	struct vy_mem *mem = range->mem;
 	if (mem->used == 0) {
-		vy_mem_update_formats(mem, index->space->format,
-				      index->space_format_with_colmask);
+		vy_mem_update_formats(mem, index->space_format,
+				      index->space_format_with_colmask,
+				      index->upsert_format);
 		return 0;
 	}
-	mem = vy_mem_new(key_def, allocator, allocator_lsn,
-			 index->space->format,
-			 index->space_format_with_colmask);
+	mem = vy_mem_new(key_def, allocator, allocator_lsn, index->space_format,
+			 index->space_format_with_colmask,
+			 index->upsert_format);
 	if (mem == NULL)
 		return -1;
 	vy_range_freeze_mem(range);
@@ -3488,31 +3511,53 @@ vy_index_open_ex(struct vy_index *index)
 }
 
 /*
- * Save a statement in the range's in-memory index.
+ * Save a statement in the range's in-memory index. If the
+ * region_stmt is NULL and the statement successfully inserted
+ * then the new lsregion statement is returned via @a region_stmt.
+ * @param range Range to which the statement insert to.
+ * @param stmt Statement, allocated on malloc().
+ * @param region_stmt NULL or the same statement, allocated on
+ *                    lsregion.
+ * @retval  0 Success.
+ * @retval -1 Memory error.
  */
 static int
 vy_range_set(struct vy_range *range, const struct tuple *stmt,
-	     int64_t alloc_lsn)
+	     const struct tuple **region_stmt)
 {
+	assert(!vy_stmt_is_region_allocated(stmt));
+	assert(*region_stmt == NULL ||
+	       vy_stmt_is_region_allocated(*region_stmt));
 	struct vy_index *index = range->index;
 	struct vy_scheduler *scheduler = index->env->scheduler;
+	struct lsregion *allocator = &index->env->allocator;
 	struct vy_mem *mem = range->mem;
+	int64_t lsn = vy_stmt_lsn(stmt);
 
 	bool was_empty = (mem->used == 0);
-
-	if (vy_mem_insert(mem, stmt, alloc_lsn) != 0)
+	/*
+	 * Allocate region_stmt on demand.
+	 */
+	if (*region_stmt == NULL) {
+		*region_stmt = vy_stmt_dup_lsregion(stmt, allocator, lsn);
+		if (*region_stmt == NULL)
+			return -1;
+	}
+	if (vy_mem_insert(mem, *region_stmt) != 0) {
+		/* Sic: can't free region_stmt allocated on lsregion */
 		return -1;
+	}
 
 	if (was_empty)
 		vy_scheduler_mem_dirtied(scheduler, mem);
 
 	if (range->used == 0) {
-		range->min_lsn = vy_stmt_lsn(stmt);
+		range->min_lsn = lsn;
 		vy_scheduler_update_range(scheduler, range);
 	}
 
-	assert(mem->min_lsn <= vy_stmt_lsn(stmt));
-	assert(range->min_lsn <= vy_stmt_lsn(stmt));
+	assert(mem->min_lsn <= lsn);
+	assert(range->min_lsn <= lsn);
 
 	size_t size = tuple_size(stmt);
 	range->used += size;
@@ -3520,26 +3565,6 @@ vy_range_set(struct vy_range *range, const struct tuple *stmt,
 	index->stmt_count++;
 
 	return 0;
-}
-
-static int
-vy_range_set_delete(struct vy_range *range, const struct tuple *stmt)
-{
-	assert(vy_stmt_type(stmt) == IPROTO_DELETE);
-
-	struct vy_mem *mem = range->mem;
-	if (range->shadow == NULL &&
-	    rlist_empty(&range->frozen) && range->run_count == 0 &&
-	    vy_mem_older_lsn(mem, stmt) == NULL) {
-		/*
-		 * Optimization: the active mem index doesn't have statements
-		 * for the key and there are no more mems and runs.
-		 *  => discard DELETE statement.
-		 */
-		return 0;
-	}
-
-	return vy_range_set(range, stmt, vy_stmt_lsn(stmt));
 }
 
 static void
@@ -3554,7 +3579,9 @@ vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
 	struct key_def *key_def = index->key_def;
 	struct vy_mem *mem = range->mem;
 	const struct tuple *older;
+	int64_t lsn = vy_stmt_lsn(stmt);
 	older = vy_mem_older_lsn(mem, stmt);
+	const struct tuple *region_stmt = NULL;
 	if ((older != NULL && vy_stmt_type(older) != IPROTO_UPSERT) ||
 	    (older == NULL && range->shadow == NULL &&
 	     rlist_empty(&range->frozen) && range->run_count == 0)) {
@@ -3572,11 +3599,12 @@ vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
 		assert(older == NULL || vy_stmt_type(older) != IPROTO_UPSERT);
 		struct tuple *upserted =
 			vy_apply_upsert(stmt, older, key_def,
-					index->space->format, false);
+					index->space_format,
+					index->upsert_format, false);
 		if (upserted == NULL)
 			return -1; /* OOM */
 		int64_t upserted_lsn = vy_stmt_lsn(upserted);
-		if (upserted_lsn != vy_stmt_lsn(stmt)) {
+		if (upserted_lsn != lsn) {
 			/**
 			 * This could only happen if the upsert completely
 			 * failed and the old tuple was returned.
@@ -3590,7 +3618,7 @@ vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
 		}
 		assert(older == NULL || upserted_lsn != vy_stmt_lsn(older));
 		assert(vy_stmt_type(upserted) == IPROTO_REPLACE);
-		int rc = vy_range_set(range, upserted, upserted_lsn);
+		int rc = vy_range_set(range, upserted, &region_stmt);
 		tuple_unref(upserted);
 		return rc;
 	}
@@ -3619,8 +3647,7 @@ vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
 			vy_stmt_set_n_upserts(stmt, VY_UPSERT_INF);
 		}
 	}
-
-	return vy_range_set(range, stmt, vy_stmt_lsn(stmt));
+	return vy_range_set(range, stmt, &region_stmt);
 }
 
 /*
@@ -3656,21 +3683,29 @@ vy_stmt_is_committed(struct vy_index *index, const struct tuple *stmt)
 	return vy_stmt_lsn(stmt) <= run->info.max_lsn;
 }
 
-/*
- * Commit a single write operation made by a transaction.
+/**
+ * Write a single statement into an index. If the statement has an
+ * lsregion copy then use it, else create it.
+ * @param index Index to write to.
+ * @param stmt Statement allocated from malloc().
+ * @param region_stmt NULL or the same statement as stmt,
+ *                    but allocated on lsregion.
+ * @param status Vinyl engine status.
+ *
+ * @retval  0 Success.
+ * @retval -1 Memory error.
  */
 static int
-vy_tx_write(struct txv *v, enum vy_status status, int64_t lsn)
+vy_tx_write(struct vy_index *index, struct tuple *stmt,
+	    const struct tuple **region_stmt, enum vy_status status)
 {
-	struct vy_index *index = v->index;
-	struct key_def *key_def = index->key_def;
+	assert(!vy_stmt_is_region_allocated(stmt));
+	assert(*region_stmt == NULL ||
+	       vy_stmt_is_region_allocated(*region_stmt));
 	struct lsregion *allocator = &index->env->allocator;
 	const int64_t *allocator_lsn = &index->env->xm->lsn;
-	struct tuple *stmt = v->stmt;
+	struct key_def *key_def = index->key_def;
 	struct vy_range *range = NULL;
-
-	vy_stmt_set_lsn(stmt, lsn);
-
 	/*
 	 * If we're recovering the WAL, it may happen so that this
 	 * particular run was dumped after the checkpoint, and we're
@@ -3699,14 +3734,10 @@ vy_tx_write(struct txv *v, enum vy_status status, int64_t lsn)
 	case IPROTO_UPSERT:
 		rc = vy_range_set_upsert(range, stmt);
 		break;
-	case IPROTO_DELETE:
-		rc = vy_range_set_delete(range, stmt);
-		break;
 	default:
-		rc = vy_range_set(range, stmt, vy_stmt_lsn(stmt));
+		rc = vy_range_set(range, stmt, region_stmt);
 		break;
 	}
-
 	/*
 	 * Invalidate cache element.
 	 */
@@ -3901,14 +3932,15 @@ vy_task_dump_abort(struct vy_task *task, bool in_shutdown)
 	struct vy_index *index = task->index;
 	struct vy_range *range = task->range;
 
-	say_error("%s: failed to dump range %s",
-		  index->name, vy_range_str(range));
-
 	/* The iterator has been cleaned up in a worker thread. */
 	vy_write_iterator_delete(task->wi);
 
-	if (!in_shutdown)
+	if (!in_shutdown) {
+		say_error("%s: failed to dump range %s: %s",
+			  index->name, vy_range_str(range),
+			  diag_last_error(&task->diag)->errmsg);
 		vy_range_discard_new_run(range);
+	}
 
 	/*
 	 * No need to roll back anything if we failed to write a run.
@@ -3967,6 +3999,8 @@ err_mem:
 err_run:
 	vy_task_delete(pool, task);
 err_task:
+	say_error("%s: can't start range dump %s: %s", index->name,
+		  vy_range_str(range), diag_last_error(diag_get())->errmsg);
 	return NULL;
 }
 
@@ -4084,13 +4118,13 @@ vy_task_split_abort(struct vy_task *task, bool in_shutdown)
 	struct vy_range *range = task->range;
 	struct vy_range *r, *tmp;
 
-	say_error("%s: failed to split range %s",
-		  index->name, vy_range_str(range));
-
 	/* The iterator has been cleaned up in a worker thread. */
 	vy_write_iterator_delete(task->wi);
 
 	if (!in_shutdown) {
+		say_error("%s: failed to split range %s: %s",
+			  index->name, vy_range_str(range),
+			  diag_last_error(&task->diag)->errmsg);
 		rlist_foreach_entry(r, &range->split_list, split_list)
 			vy_range_discard_new_run(r);
 	}
@@ -4217,6 +4251,8 @@ err_parts:
 	}
 	vy_task_delete(pool, task);
 err_task:
+	say_error("%s: can't start range splitting %s: %s", index->name,
+		  vy_range_str(range), diag_last_error(diag_get())->errmsg);
 	return NULL;
 }
 
@@ -4322,14 +4358,15 @@ vy_task_compact_abort(struct vy_task *task, bool in_shutdown)
 	struct vy_index *index = task->index;
 	struct vy_range *range = task->range;
 
-	say_error("%s: failed to compact range %s",
-		  index->name, vy_range_str(range));
-
 	/* The iterator has been cleaned up in worker. */
 	vy_write_iterator_delete(task->wi);
 
-	if (!in_shutdown)
+	if (!in_shutdown) {
+		say_error("%s: failed to compact range %s: %s",
+			  index->name, vy_range_str(range),
+			  diag_last_error(&task->diag)->errmsg);
 		vy_range_discard_new_run(range);
+	}
 
 	/*
 	 * No need to roll back anything if we failed to write a run.
@@ -4396,6 +4433,8 @@ err_mem:
 err_run:
 	vy_task_delete(pool, task);
 err_task:
+	say_error("%s: can't start range compacting %s: %s", index->name,
+		  vy_range_str(range), diag_last_error(diag_get())->errmsg);
 	return NULL;
 }
 
@@ -4449,7 +4488,10 @@ struct vy_scheduler {
 	struct cord *worker_pool;
 	struct fiber *scheduler;
 	struct ev_loop *loop;
+	/** Total number of worker threads. */
 	int worker_pool_size;
+	/** Number worker threads that are currently idle. */
+	int workers_available;
 	bool is_worker_pool_running;
 
 	/**
@@ -4708,6 +4750,18 @@ vy_schedule(struct vy_scheduler *scheduler, struct vy_task **ptask)
 	if (*ptask != NULL)
 		return 0;
 
+	if (scheduler->workers_available <= 1) {
+		/*
+		 * If all worker threads are busy doing compaction
+		 * when we run out of quota, ongoing transactions will
+		 * hang until one of the threads has finished, which
+		 * may take quite a while. To avoid unpredictably long
+		 * stalls, always keep one worker thread reserved for
+		 * dumps.
+		 */
+		return 0;
+	}
+
 	if (vy_scheduler_peek_compact(scheduler, ptask) != 0)
 		goto fail;
 	if (*ptask != NULL)
@@ -4718,7 +4772,6 @@ vy_schedule(struct vy_scheduler *scheduler, struct vy_task **ptask)
 fail:
 	assert(!diag_is_empty(diag_get()));
 	diag_move(diag_get(), &scheduler->diag);
-	error_log(diag_last_error(&scheduler->diag));
 	return -1;
 
 }
@@ -4728,22 +4781,26 @@ vy_scheduler_complete_task(struct vy_scheduler *scheduler,
 			   struct vy_task *task)
 {
 	struct diag *diag = &task->diag;
-	if (task->status != 0)
+	if (task->status != 0) {
+		assert(!diag_is_empty(diag));
 		goto fail; /* ->execute fialed */
-	diag = diag_get();
-	ERROR_INJECT(ERRINJ_VY_TASK_COMPLETE,
-		     {diag_set(ClientError, ER_INJECTION,
-			       "vinyl task completion"); goto fail;});
+	}
+	ERROR_INJECT(ERRINJ_VY_TASK_COMPLETE, {
+			diag_set(ClientError, ER_INJECTION,
+			       "vinyl task completion");
+			diag_move(diag_get(), diag);
+			goto fail; });
 	if (task->ops->complete &&
-	    task->ops->complete(task) != 0)
+	    task->ops->complete(task) != 0) {
+		assert(!diag_is_empty(diag_get()));
+		diag_move(diag_get(), diag);
 		goto fail;
+	}
 	return 0;
 fail:
-	assert(!diag_is_empty(diag));
-	error_log(diag_last_error(diag));
-	diag_move(diag, &scheduler->diag);
 	if (task->ops->abort)
 		task->ops->abort(task, false);
+	diag_move(diag, &scheduler->diag);
 	return -1;
 }
 
@@ -4766,7 +4823,6 @@ vy_scheduler_f(va_list va)
 		return 0; /* destroyed */
 	vy_scheduler_start_workers(scheduler);
 
-	int workers_available = scheduler->worker_pool_size;
 	while (scheduler->scheduler != NULL) {
 		struct stailq output_queue;
 		struct vy_task *task, *next;
@@ -4790,8 +4846,9 @@ vy_scheduler_f(va_list va)
 					     task->dump_size,
 					     task->dumped_statements);
 			vy_task_delete(&scheduler->task_pool, task);
-			workers_available++;
-			assert(workers_available <= scheduler->worker_pool_size);
+			scheduler->workers_available++;
+			assert(scheduler->workers_available <=
+			       scheduler->worker_pool_size);
 		}
 		/*
 		 * Reset the timeout if we managed to successfully
@@ -4813,7 +4870,7 @@ vy_scheduler_f(va_list va)
 		if (tasks_failed > 0)
 			goto error;
 		/* All worker threads are busy. */
-		if (workers_available == 0)
+		if (scheduler->workers_available == 0)
 			goto wait;
 		/* Get a task to schedule. */
 		if (vy_schedule(scheduler, &task) != 0)
@@ -4830,7 +4887,7 @@ vy_scheduler_f(va_list va)
 			tt_pthread_cond_signal(&scheduler->worker_cond);
 		tt_pthread_mutex_unlock(&scheduler->mutex);
 
-		workers_available--;
+		scheduler->workers_available--;
 		fiber_reschedule();
 		continue;
 error:
@@ -4914,9 +4971,10 @@ vy_scheduler_start_workers(struct vy_scheduler *scheduler)
 
 	/* Start worker threads */
 	scheduler->is_worker_pool_running = true;
-	scheduler->worker_pool_size = cfg_geti("vinyl.threads");
-	if (scheduler->worker_pool_size < 0)
-		scheduler->worker_pool_size = 1;
+	scheduler->worker_pool_size = cfg_geti("vinyl_threads");
+	/* One thread is reserved for dumps, see vy_schedule(). */
+	assert(scheduler->worker_pool_size >= 2);
+	scheduler->workers_available = scheduler->worker_pool_size;
 	stailq_create(&scheduler->input_queue);
 	stailq_create(&scheduler->output_queue);
 	scheduler->worker_pool = (struct cord *)
@@ -5031,6 +5089,8 @@ vy_checkpoint(struct vy_env *env)
 	if (scheduler->is_throttled) {
 		assert(!diag_is_empty(&scheduler->diag));
 		diag_add_error(diag_get(), diag_last_error(&scheduler->diag));
+		say_error("Can't checkpoint, scheduler is throttled with: %s",
+			  diag_last_error(diag_get())->errmsg);
 		return -1;
 	}
 
@@ -5050,13 +5110,18 @@ vy_wait_checkpoint(struct vy_env *env, struct vclock *vclock)
 	if (scheduler->mem_min_lsn <= scheduler->checkpoint_lsn) {
 		assert(!diag_is_empty(&scheduler->diag));
 		diag_add_error(diag_get(), diag_last_error(&scheduler->diag));
-		return -1;
+		goto error;
 	}
 
 	if (vy_log_rotate(env->log, vclock_sum(vclock)) != 0)
-		return -1;
+		goto error;
 
+	say_info("vinyl checkpoint done");
 	return 0;
+error:
+	say_error("vinyl checkpoint error: %s",
+		  diag_last_error(diag_get())->errmsg);
+	return -1;
 }
 
 /* Scheduler }}} */
@@ -5069,11 +5134,9 @@ vy_conf_new()
 		diag_set(OutOfMemory, sizeof(*conf), "conf", "struct");
 		return NULL;
 	}
-	conf->memory_limit = cfg_getd("vinyl.memory_limit")
-			     * 1024 * 1024 * 1024;
-	conf->cache = cfg_getd("vinyl.cache")
-				 * 1024 * 1024 * 1024;
-	conf->bloom_fpr = cfg_getd("vinyl.bloom_fpr");
+	conf->memory_limit = cfg_getd("vinyl_memory");
+	conf->cache = cfg_getd("vinyl_cache");
+	conf->bloom_fpr = cfg_getd("vinyl_bloom_fpr");
 
 	conf->path = strdup(cfg_gets("vinyl_dir"));
 	if (conf->path == NULL) {
@@ -5230,8 +5293,7 @@ vy_info_append_performance(struct vy_env *env, struct vy_info_handler *h)
 
 	vy_info_append_u64(h, "tx_rollback", stat->tx_rlb);
 	vy_info_append_u64(h, "tx_conflict", stat->tx_conflict);
-	vy_info_append_u32(h, "tx_active_rw", env->xm->count_rw);
-	vy_info_append_u32(h, "tx_active_ro", env->xm->count_rd);
+	vy_info_append_u32(h, "tx_active", env->xm->count_tx);
 
 	vy_info_append_u64(h, "dump_bandwidth", vy_stat_dump_bandwidth(stat));
 	vy_info_append_u64(h, "dump_total", stat->dump_total);
@@ -5418,7 +5480,7 @@ vy_index_drop(struct vy_index *index)
 	 * already been written to WAL. So if we fail to write the
 	 * change to the metadata log, we leave it in the log buffer,
 	 * to be flushed along with the next transaction. If it is
-	 * not flushed before the server is shut down, we replay it
+	 * not flushed before the instance is shut down, we replay it
 	 * on local recovery from WAL.
 	 */
 	if (env->status == VINYL_FINAL_RECOVERY_LOCAL && was_dropped)
@@ -5434,21 +5496,43 @@ vy_index_drop(struct vy_index *index)
 extern struct tuple_format_vtab vy_tuple_format_vtab;
 
 /**
- * Create the format for tuples with column mask of update
- * operation. @sa vy_index.column_mask, vy_can_skip_update().
- * @param space_format Format of the space of an index.
+ * Create a tuple format with column mask of an update operation.
+ * @sa vy_index.column_mask, vy_can_skip_update().
+ * @param space_format A base tuple format.
  *
  * @retval not NULL Success.
  * @retval     NULL Memory or format register error.
  */
-static struct tuple_format *
-vy_create_space_format_with_colmask(struct tuple_format *space_format)
+static inline struct tuple_format *
+vy_tuple_format_new_with_colmask(struct tuple_format *space_format)
 {
 	struct tuple_format *format = tuple_format_dup(space_format);
 	if (format == NULL)
 		return NULL;
 	/* + size of column mask. */
+	assert(format->extra_size == 0);
 	format->extra_size = sizeof(uint64_t);
+	return format;
+}
+
+/**
+ * Create a tuple format for UPSERT tuples. UPSERTs has an additional
+ * extra byte before an offsets table, that stores the count
+ * of squashed upserts @sa vy_squash.
+ * @param space_format A base tuple format.
+ *
+ * @retval not NULL Success.
+ * @retval     NULL Memory or format register error.
+ */
+static inline struct tuple_format *
+vy_tuple_format_new_upsert(struct tuple_format *space_format)
+{
+	struct tuple_format *format = tuple_format_dup(space_format);
+	if (format == NULL)
+		return NULL;
+	/* + size of n_upserts. */
+	assert(format->extra_size == 0);
+	format->extra_size = sizeof(uint8_t);
 	return format;
 }
 
@@ -5502,16 +5586,24 @@ vy_index_new(struct vy_env *e, struct key_def *user_key_def,
 	if (index->surrogate_format == NULL)
 		goto fail_format;
 	tuple_format_ref(index->surrogate_format, 1);
+
 	if (user_key_def->iid == 0) {
+		index->upsert_format =
+			vy_tuple_format_new_upsert(space->format);
+		if (index->upsert_format == NULL)
+			goto fail_upsert_format;
+
 		index->space_format_with_colmask =
-			vy_create_space_format_with_colmask(space->format);
+			vy_tuple_format_new_with_colmask(space->format);
 		if (index->space_format_with_colmask == NULL)
 			goto fail_space_format_with_colmask;
 	} else {
 		index->space_format_with_colmask =
 			pk->space_format_with_colmask;
+		index->upsert_format = pk->upsert_format;
 	}
 	tuple_format_ref(index->space_format_with_colmask, 1);
+	tuple_format_ref(index->upsert_format, 1);
 
 	if (vy_index_conf_create(index, index->key_def))
 		goto fail_conf;
@@ -5545,6 +5637,9 @@ vy_index_new(struct vy_env *e, struct key_def *user_key_def,
 	read_set_new(&index->read_set);
 	index->space = space;
 	index->user_key_def = user_key_def;
+	index->space_format = space->format;
+	tuple_format_ref(index->space_format, 1);
+	index->space_index_count = space->index_count;
 
 	return index;
 
@@ -5556,6 +5651,8 @@ fail_run_hist:
 fail_conf:
 	tuple_format_ref(index->space_format_with_colmask, -1);
 fail_space_format_with_colmask:
+	tuple_format_ref(index->upsert_format, -1);
+fail_upsert_format:
 	tuple_format_ref(index->surrogate_format, -1);
 fail_format:
 	if (user_key_def->iid > 0)
@@ -5573,7 +5670,7 @@ vy_prepare_alter_space(struct space *old_space, struct space *new_space)
 	if (old_space->index_count &&
 	    old_space->index_count <= new_space->index_count) {
 		struct vy_index *pk = vy_index(old_space->index[0]);
-		if (vy_status(pk->env) == VINYL_ONLINE && pk->stmt_count != 0) {
+		if (pk->env->status == VINYL_ONLINE && pk->stmt_count != 0) {
 			diag_set(ClientError, ER_UNSUPPORTED, "Vinyl",
 				 "altering not empty space");
 			return -1;
@@ -5588,20 +5685,44 @@ vy_commit_alter_space(struct space *old_space, struct space *new_space)
 	(void) old_space;
 	struct vy_index *pk = vy_index(new_space->index[0]);
 	pk->space = new_space;
+
+	/* Update the format with column mask. */
 	struct tuple_format *format =
-		vy_create_space_format_with_colmask(new_space->format);
+		vy_tuple_format_new_with_colmask(new_space->format);
 	if (format == NULL)
 		return -1;
 	tuple_format_ref(format, 1);
+
+	/* Update the upsert format. */
+	struct tuple_format *upsert_format =
+		vy_tuple_format_new_upsert(new_space->format);
+	if (upsert_format == NULL) {
+		tuple_format_ref(format, -1);
+		return -1;
+	}
+	tuple_format_ref(upsert_format, 1);
+
+	/* Set new formats. */
+	tuple_format_ref(pk->space_format, -1);
+	tuple_format_ref(pk->upsert_format, -1);
 	tuple_format_ref(pk->space_format_with_colmask, -1);
+	pk->upsert_format = upsert_format;
 	pk->space_format_with_colmask = format;
+	pk->space_format = new_space->format;
+	pk->space_index_count = new_space->index_count;
+	tuple_format_ref(pk->space_format, 1);
+
 	for (uint32_t i = 1; i < new_space->index_count; ++i) {
 		struct vy_index *index = vy_index(new_space->index[i]);
 		index->space = new_space;
 		tuple_format_ref(index->space_format_with_colmask, -1);
+		tuple_format_ref(index->space_format, -1);
 		index->space_format_with_colmask =
 			pk->space_format_with_colmask;
+		index->space_format = new_space->format;
 		tuple_format_ref(index->space_format_with_colmask, 1);
+		tuple_format_ref(index->space_format, 1);
+		index->space_index_count = new_space->index_count;
 	}
 	return 0;
 }
@@ -5614,13 +5735,14 @@ vy_index_delete(struct vy_index *index)
 	free(index->name);
 	free(index->path);
 	tuple_format_ref(index->surrogate_format, -1);
-	if (index->key_def->iid == 0)
-		tuple_format_ref(index->space_format_with_colmask, -1);
+	tuple_format_ref(index->space_format_with_colmask, -1);
+	tuple_format_ref(index->upsert_format, -1);
 	if (index->key_def->iid > 0)
 		key_def_delete(index->key_def);
 	key_def_delete(index->user_key_def);
 	histogram_delete(index->run_hist);
 	vy_cache_delete(index->cache);
+	tuple_format_ref(index->space_format, -1);
 	TRASH(index);
 	free(index);
 }
@@ -5724,7 +5846,7 @@ vy_upsert_try_to_squash(struct tuple_format *format, struct region *region,
 static struct tuple *
 vy_apply_upsert(const struct tuple *new_stmt, const struct tuple *old_stmt,
 		const struct key_def *key_def, struct tuple_format *format,
-		bool suppress_error)
+		struct tuple_format *upsert_format, bool suppress_error)
 {
 	/*
 	 * old_stmt - previous (old) version of stmt
@@ -5739,7 +5861,7 @@ vy_apply_upsert(const struct tuple *new_stmt, const struct tuple *old_stmt,
 		/*
 		 * INSERT case: return new stmt.
 		 */
-		return vy_stmt_replace_from_upsert(new_stmt);
+		return vy_stmt_replace_from_upsert(format, new_stmt);
 	}
 
 	/*
@@ -5792,7 +5914,7 @@ vy_apply_upsert(const struct tuple *new_stmt, const struct tuple *old_stmt,
 	 * UPSERT + UPSERT case: combine operations
 	 */
 	assert(old_ops_end - old_ops > 0);
-	if (vy_upsert_try_to_squash(format, region,
+	if (vy_upsert_try_to_squash(upsert_format, region,
 				    result_mp, result_mp_end,
 				    old_ops, old_ops_end,
 				    new_ops, new_ops_end,
@@ -5823,8 +5945,8 @@ vy_apply_upsert(const struct tuple *new_stmt, const struct tuple *old_stmt,
 	operations[0].iov_base = (void *)ops_buf;
 	operations[0].iov_len = header - ops_buf;
 
-	result_stmt = vy_stmt_new_upsert(format, result_mp, result_mp_end,
-					 operations, 3);
+	result_stmt = vy_stmt_new_upsert(upsert_format, result_mp,
+					 result_mp_end, operations, 3);
 	region_truncate(region, region_svp);
 	if (result_stmt == NULL)
 		return NULL;
@@ -5844,7 +5966,8 @@ check_key:
 			 key_def->name, space_name_by_id(key_def->space_id));
 		error_log(diag_last_error(diag_get()));
 		tuple_unref(result_stmt);
-		result_stmt = vy_stmt_dup(old_stmt, format);
+		result_stmt = vy_stmt_dup(old_stmt, old_type == IPROTO_UPSERT ?
+						    upsert_format : format);
 	}
 	return result_stmt;
 }
@@ -5879,7 +6002,8 @@ vy_tx_set(struct vy_tx *tx, struct vy_index *index, struct tuple *stmt)
 			(void) old_type;
 
 			stmt = vy_apply_upsert(stmt, old->stmt, index->key_def,
-					       index->space->format, true);
+					       index->space_format,
+					       index->upsert_format, true);
 			if (stmt == NULL)
 				return -1;
 			assert(vy_stmt_type(stmt) != 0);
@@ -5934,9 +6058,7 @@ vy_index_get(struct vy_tx *tx, struct vy_index *index, const char *key,
 	ev_tstamp start  = ev_now(loop());
 	int64_t vlsn = INT64_MAX;
 	const int64_t *vlsn_ptr = &vlsn;
-	if (tx == NULL)
-		vlsn = e->xm->lsn;
-	else
+	if (tx != NULL)
 		vlsn_ptr = &tx->vlsn;
 
 	struct vy_read_iterator itr;
@@ -6609,7 +6731,7 @@ vy_index_upsert(struct vy_tx *tx, struct vy_index *index,
 	struct iovec operations[1];
 	operations[0].iov_base = (void *)expr;
 	operations[0].iov_len = expr_end - expr;
-	vystmt = vy_stmt_new_upsert(index->space->format, tuple, tuple_end,
+	vystmt = vy_stmt_new_upsert(index->upsert_format, tuple, tuple_end,
 				    operations, 1);
 	if (vystmt == NULL)
 		return -1;
@@ -6875,12 +6997,38 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 	 * Sic: the loop below must not yield after recovery.
 	 */
 	uint64_t write_count = 0;
-	for (v = write_set_first(&tx->write_set);
-	     v != NULL; v = write_set_next(&tx->write_set, v)) {
-		int rc = vy_tx_write(v, e->status, lsn);
+	const struct tuple *delete = NULL, *replace = NULL;
+	enum vy_status status = e->status;
+	uint32_t current_space_id = 0;
+	stailq_foreach_entry(v, &tx->log, next_in_log) {
+		/*
+		 * The tx log contains both reads and writes, but
+		 * we must save only writes.
+		 */
+		if (v->is_read)
+			continue;
+		struct vy_index *index = v->index;
+		struct tuple *stmt = v->stmt;
+		vy_stmt_set_lsn(stmt, lsn);
+		enum iproto_type type = vy_stmt_type(stmt);
+		if (index->key_def->iid == 0) {
+			/*
+			 * The beginning of the new txn_stmt is met.
+			 */
+			current_space_id = index->space->def.id;
+			replace = NULL;
+			delete = NULL;
+		}
+		assert(index->space->def.id == current_space_id);
+		/*
+		 * In secondary indexes only REPLACE and DELETE
+		 * can be wrote.
+		 */
+		const struct tuple **region_stmt =
+			(type == IPROTO_DELETE) ? &delete : &replace;
+		if (vy_tx_write(index, stmt, region_stmt, status) != 0)
+			return -1;
 		write_count++;
-		assert(rc == 0); /* TODO: handle BPS tree errors properly */
-		(void)rc;
 	}
 
 	uint32_t count = 0;
@@ -6910,7 +7058,7 @@ vy_begin(struct vy_env *e)
 			 "struct vy_tx");
 		return NULL;
 	}
-	vy_tx_begin(e->xm, tx, VINYL_TX_RW);
+	vy_tx_begin(e->xm, tx);
 	return tx;
 }
 
@@ -7074,12 +7222,6 @@ error_conf:
 	return NULL;
 }
 
-enum vy_status
-vy_status(struct vy_env *env)
-{
-	return env->status;
-}
-
 void
 vy_env_delete(struct vy_env *e)
 {
@@ -7111,9 +7253,6 @@ int
 vy_bootstrap(struct vy_env *e)
 {
 	assert(e->status == VINYL_OFFLINE);
-	/* First start. Create a new metadata log. */
-	if (vy_log_create(e->log) != 0)
-		return -1;
 	e->status = VINYL_ONLINE;
 	return 0;
 }
@@ -7133,14 +7272,6 @@ vy_begin_initial_recovery(struct vy_env *e, struct vclock *vclock)
 		e->xm->lsn = signature;
 		e->status = VINYL_INITIAL_RECOVERY_LOCAL;
 	} else {
-		/*
-		 * Remote recovery. There's no local metadata log,
-		 * hence no recovery context. During remote recovery
-		 * we may dump data received from the master, so we
-		 * create a new log right away.
-		 */
-		if (vy_log_create(e->log) != 0)
-			return -1;
 		e->xm->lsn = 0;
 		e->status = VINYL_INITIAL_RECOVERY_REMOTE;
 	}
@@ -7176,11 +7307,6 @@ vy_end_recovery(struct vy_env *e)
 			return -1;
 		break;
 	case VINYL_FINAL_RECOVERY_REMOTE:
-		/*
-		 * Remote recovery completion. The metadata log
-		 * is already open and there's no recovery context
-		 * (see vy_begin_initial_recovery()).
-		 */
 		break;
 	default:
 		unreachable();
@@ -7220,8 +7346,13 @@ struct vy_run_iterator {
 	/* Members needed for memory allocation and disk access */
 	/* index */
 	struct vy_index *index;
-	/** Format ot allocate new tuples read from pages. */
+	/**
+	 * Format ot allocate REPLACE and DELETE tuples read from
+	 * pages.
+	 */
 	struct tuple_format *format;
+	/** Same as format, but for UPSERT tuples. */
+	struct tuple_format *upsert_format;
 	/* run */
 	struct vy_run *run;
 	/* range of the run */
@@ -7264,7 +7395,8 @@ vy_run_iterator_open(struct vy_run_iterator *itr, struct vy_iterator_stat *stat,
 		     struct vy_range *range, struct vy_run *run,
 		     enum iterator_type iterator_type,
 		     const struct tuple *key, const int64_t *vlsn,
-		     struct tuple_format *format);
+		     struct tuple_format *format,
+		     struct tuple_format *upsert_format);
 
 /* }}} vy_run_iterator API forward declaration */
 
@@ -7334,14 +7466,19 @@ vy_page_delete(struct vy_page *page)
 
 /**
  * Read raw stmt data from the page
- * \param page page
- * \param stmt_no stmt position in the page
- * \param[out] pinfo stmt metadata
- * \return stmt data including offsets table
+ * @param page          Page.
+ * @param stmt_no       Statement position in the page.
+ * @param format        Format for REPLACE/DELETE tuples.
+ * @param upsert_format Format for UPSERT tuples.
+ * @param key_def       Key definition of an index.
+ *
+ * @retval not NULL Statement read from page.
+ * @retval     NULL Memory error.
  */
 static struct tuple *
 vy_page_stmt(struct vy_page *page, uint32_t stmt_no,
-	     struct tuple_format *format, struct key_def *key_def)
+	     struct tuple_format *format, struct tuple_format *upsert_format,
+	     struct key_def *key_def)
 {
 	assert(stmt_no < page->count);
 	const char *data = page->data + page->row_index[stmt_no];
@@ -7351,7 +7488,9 @@ vy_page_stmt(struct vy_page *page, uint32_t stmt_no,
 	struct xrow_header xrow;
 	if (xrow_header_decode(&xrow, &data, data_end) != 0)
 		return NULL;
-	return vy_stmt_decode(&xrow, format, key_def);
+	struct tuple_format *format_to_use = (xrow.type == IPROTO_UPSERT)
+		? upsert_format : format;
+	return vy_stmt_decode(&xrow, format_to_use, key_def);
 }
 
 /**
@@ -7686,7 +7825,7 @@ vy_run_iterator_read(struct vy_run_iterator *itr,
 	if (rc != 0)
 		return rc;
 	*stmt = vy_page_stmt(page, pos.pos_in_page, itr->format,
-			     itr->index->key_def);
+			     itr->upsert_format, itr->index->key_def);
 	if (*stmt == NULL)
 		return -1;
 	return 0;
@@ -7747,6 +7886,7 @@ vy_run_iterator_search_in_page(struct vy_run_iterator *itr,
 	while (beg != end) {
 		uint32_t mid = beg + (end - beg) / 2;
 		struct tuple *fnd_key = vy_page_stmt(page, mid, itr->format,
+						     itr->upsert_format,
 						     itr->index->key_def);
 		if (fnd_key == NULL)
 			return end;
@@ -8062,11 +8202,13 @@ vy_run_iterator_open(struct vy_run_iterator *itr, struct vy_iterator_stat *stat,
 		     struct vy_range *range, struct vy_run *run,
 		     enum iterator_type iterator_type,
 		     const struct tuple *key, const int64_t *vlsn,
-		     struct tuple_format *format)
+		     struct tuple_format *format,
+		     struct tuple_format *upsert_format)
 {
 	itr->base.iface = &vy_run_iterator_iface;
 	itr->stat = stat;
 	itr->format = format;
+	itr->upsert_format = upsert_format;
 	itr->index = range->index;
 	itr->range = range;
 	itr->run = run;
@@ -8713,11 +8855,13 @@ struct vy_merge_src {
 static void
 vy_merge_iterator_open(struct vy_merge_iterator *itr, struct vy_index *index,
 		       enum iterator_type iterator_type,
-		       const struct tuple *key, struct tuple_format *format)
+		       const struct tuple *key, struct tuple_format *format,
+		       struct tuple_format *upsert_format)
 {
 	assert(key != NULL);
 	itr->index = index;
 	itr->format = format;
+	itr->upsert_format = upsert_format;
 	itr->index_version = 0;
 	itr->curr_range = NULL;
 	itr->range_version = 0;
@@ -9098,7 +9242,6 @@ vy_merge_iterator_squash_upsert(struct vy_merge_iterator *itr,
 	struct key_def *def = itr->index->key_def;
 	if (t == NULL)
 		return 0;
-	struct tuple_format *format = itr->format;
 	/* Upserts enabled only in the primary index. */
 	assert(vy_stmt_type(t) != IPROTO_UPSERT || def->iid == 0);
 	tuple_ref(t);
@@ -9112,7 +9255,8 @@ vy_merge_iterator_squash_upsert(struct vy_merge_iterator *itr,
 		if (next == NULL)
 			break;
 		struct tuple *applied;
-		applied = vy_apply_upsert(t, next, def, format, suppress_error);
+		applied = vy_apply_upsert(t, next, def, itr->format,
+					  itr->upsert_format, suppress_error);
 		tuple_unref(t);
 		if (applied == NULL)
 			return -1;
@@ -9256,12 +9400,14 @@ vy_merge_iterator_restore(struct vy_merge_iterator *itr,
 struct vy_write_iterator {
 	struct vy_index *index;
 	/**
-	 * Format to allocate new tuples from vy_run. We have to
-	 * store the reference to the format separate from index,
-	 * because the index can be altered during work of the
-	 * iterator.
+	 * Format to allocate new REPLACE and DELETE tuples from
+	 * vy_run. We have to store the reference to the format
+	 * separate from index, because the index can be altered
+	 * during work of the iterator.
 	 */
 	struct tuple_format *surrogate_format;
+	/** Same as surrogate_format, but for UPSERT tuples. */
+	struct tuple_format *upsert_format;
 	/* The minimal VLSN among all active transactions */
 	int64_t oldest_vlsn;
 	/* There are is no level older than the one we're writing to. */
@@ -9295,9 +9441,11 @@ vy_write_iterator_open(struct vy_write_iterator *wi, struct vy_index *index,
 	if (wi->key == NULL)
 		return -1;
 	wi->surrogate_format = index->surrogate_format;
+	wi->upsert_format = index->upsert_format;
 	tuple_format_ref(wi->surrogate_format, 1);
+	tuple_format_ref(wi->upsert_format, 1);
 	vy_merge_iterator_open(&wi->mi, index, ITER_GE, wi->key,
-			       wi->surrogate_format);
+			       wi->surrogate_format, wi->upsert_format);
 	return 0;
 }
 
@@ -9329,7 +9477,7 @@ vy_write_iterator_add_run(struct vy_write_iterator *wi,
 	static const int64_t vlsn = INT64_MAX;
 	vy_run_iterator_open(&src->run_iterator, &wi->run_iterator_stat,
 			     range, run, ITER_GE, wi->key, &vlsn,
-			     wi->surrogate_format);
+			     wi->surrogate_format, wi->upsert_format);
 	return 0;
 }
 
@@ -9424,7 +9572,8 @@ vy_write_iterator_next(struct vy_write_iterator *wi, struct tuple **ret)
 			/* Turn UPSERT to REPLACE. */
 			struct tuple *applied;
 			applied = vy_apply_upsert(stmt, NULL, def,
-						  wi->surrogate_format, false);
+						  wi->surrogate_format,
+						  wi->upsert_format, false);
 			tuple_unref(stmt);
 			if (applied == NULL)
 				return -1;
@@ -9458,6 +9607,7 @@ vy_write_iterator_delete(struct vy_write_iterator *wi)
 	assert(wi->tmp_stmt == NULL);
 	assert(wi->key == NULL);
 	tuple_format_ref(wi->surrogate_format, -1);
+	tuple_format_ref(wi->upsert_format, -1);
 	vy_merge_iterator_close(&wi->mi);
 
 	free(wi);
@@ -9541,13 +9691,22 @@ vy_read_iterator_add_disk(struct vy_read_iterator *itr)
 	assert(itr->curr_range->shadow == NULL);
 	struct vy_iterator_stat *stat = &itr->index->env->stat->run_stat;
 	struct vy_run *run;
+	struct tuple_format *format = itr->index->surrogate_format;
+	/*
+	 * The format of the statement must be exactly the space
+	 * format with the same identifier to fully match the
+	 * format in vy_mem.
+	 */
+	if (itr->index->space_index_count == 1)
+		format = itr->index->space_format;
 	rlist_foreach_entry(run, &itr->curr_range->runs, in_range) {
 		struct vy_merge_src *sub_src = vy_merge_iterator_add(
 			&itr->merge_iterator, false, true);
 		vy_run_iterator_open(&sub_src->run_iterator, stat,
 				     itr->curr_range,
 				     run, itr->iterator_type, itr->key,
-				     itr->vlsn, itr->index->surrogate_format);
+				     itr->vlsn, format,
+				     itr->index->upsert_format);
 	}
 }
 
@@ -9611,7 +9770,8 @@ vy_read_iterator_start(struct vy_read_iterator *itr)
 	vy_range_iterator_next(&itr->range_iterator, &itr->curr_range);
 	vy_merge_iterator_open(&itr->merge_iterator, itr->index,
 			       itr->iterator_type, itr->key,
-			       itr->index->surrogate_format);
+			       itr->index->space_format,
+			       itr->index->upsert_format);
 	vy_read_iterator_use_range(itr);
 }
 
@@ -9631,7 +9791,8 @@ restart:
 	vy_merge_iterator_close(&itr->merge_iterator);
 	vy_merge_iterator_open(&itr->merge_iterator, itr->index,
 			       itr->iterator_type, itr->key,
-			       itr->index->surrogate_format);
+			       itr->index->space_format,
+			       itr->index->upsert_format);
 	vy_read_iterator_use_range(itr);
 	rc = vy_merge_iterator_restore(&itr->merge_iterator, itr->curr_stmt);
 	if (rc == -1)
@@ -9697,7 +9858,8 @@ vy_read_iterator_next_range(struct vy_read_iterator *itr, struct tuple **ret)
 	vy_merge_iterator_close(&itr->merge_iterator);
 	vy_merge_iterator_open(&itr->merge_iterator, itr->index,
 			       itr->iterator_type, itr->key,
-			       itr->index->surrogate_format);
+			       itr->index->space_format,
+			       itr->index->upsert_format);
 	vy_range_iterator_next(&itr->range_iterator, &itr->curr_range);
 	vy_read_iterator_use_range(itr);
 	struct tuple *stmt = NULL;
@@ -9765,7 +9927,9 @@ vy_read_iterator_next(struct vy_read_iterator *itr, struct tuple **result)
 			if (vy_stmt_type(t) == IPROTO_UPSERT) {
 				struct tuple *applied;
 				applied = vy_apply_upsert(t, NULL, def,
-							  mi->format, true);
+							  mi->format,
+							  mi->upsert_format,
+							  true);
 				tuple_unref(t);
 				t = applied;
 				assert(vy_stmt_type(t) == IPROTO_REPLACE);
@@ -9961,7 +10125,8 @@ vy_squash_process(struct vy_squash *squash)
 		struct tuple *applied;
 		if (vy_stmt_type(mem_stmt) == IPROTO_UPSERT)
 			applied = vy_apply_upsert(mem_stmt, result, key_def,
-						  mem->format, true);
+						  mem->format,
+						  mem->upsert_format, true);
 		else
 			applied = vy_stmt_dup(mem_stmt, mem->format);
 		tuple_unref(result);
@@ -9976,10 +10141,11 @@ vy_squash_process(struct vy_squash *squash)
 	 * and adjust the quota.
 	 */
 	size_t mem_used_before = lsregion_used(&env->allocator);
-	rc = vy_range_set(range, result, env->xm->lsn);
+	const struct tuple *region_stmt = NULL;
+	rc = vy_range_set(range, result, &region_stmt);
+	tuple_unref(result);
 	size_t mem_used_after = lsregion_used(&env->allocator);
 	assert(mem_used_after >= mem_used_before);
-	tuple_unref(result);
 	if (rc == 0)
 		vy_quota_force_use(&env->quota,
 				   mem_used_after - mem_used_before);
@@ -10088,7 +10254,7 @@ vy_cursor_new(struct vy_tx *tx, struct vy_index *index, const char *key,
 	c->env = e;
 	if (tx == NULL) {
 		tx = &c->tx_autocommit;
-		vy_tx_begin(e->xm, tx, VINYL_TX_RO);
+		vy_tx_begin(e->xm, tx);
 	} else {
 		rlist_add(&tx->cursors, &c->next_in_tx);
 	}
@@ -10133,7 +10299,7 @@ vy_cursor_next(struct vy_cursor *c, struct tuple **result)
 	struct tuple *vyresult = NULL;
 	struct vy_index *index = c->index;
 	struct key_def *def = index->key_def;
-	assert(index->space->index_count > 0);
+	assert(index->space_index_count > 0);
 	*result = NULL;
 
 	if (c->tx == NULL) {

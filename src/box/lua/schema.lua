@@ -207,18 +207,18 @@ end
   will return table { type = 'hash', temporary = true, unique = true }
 --]]
 local function update_param_table(table, defaults)
-    if table == nil then
-        return defaults
-    end
-    if defaults == nil then
-        return table
-    end
-    for k,v in pairs(defaults) do
-        if table[k] == nil then
-            table[k] = v
+    local new_table = {}
+    if defaults ~= nil then
+        for k,v in pairs(defaults) do
+            new_table[k] = v
         end
     end
-    return table
+    if table ~= nil then
+        for k,v in pairs(table) do
+            new_table[k] = v
+        end
+    end
+    return new_table
 end
 
 box.begin = function()
@@ -365,11 +365,16 @@ local function check_index_parts(parts)
 end
 
 local function update_index_parts(parts)
-    for i=1,#parts,2 do
+    local new_parts = {}
+    for i=1,#parts do
         -- Lua uses one-based field numbers but _space is zero-based
-        parts[i] = parts[i] - 1
+        if i % 2 == 1 then
+            new_parts[i] = parts[i] - 1
+        else
+            new_parts[i] = parts[i]
+        end
     end
-    return parts
+    return new_parts
 end
 
 box.schema.index.create = function(space_id, name, options)
@@ -407,10 +412,10 @@ box.schema.index.create = function(space_id, name, options)
         options_defaults = {
             -- path has no default, or, rather, it defaults
             -- to a subdirectory of the server data dir if it is not set
-            page_size = box.cfg.vinyl.page_size,
-            range_size = box.cfg.vinyl.range_size,
-            run_count_per_level = box.cfg.vinyl.run_count_per_level,
-            run_size_ratio = box.cfg.vinyl.run_size_ratio,
+            page_size = box.cfg.vinyl_page_size,
+            range_size = box.cfg.vinyl_range_size,
+            run_count_per_level = box.cfg.vinyl_run_count_per_level,
+            run_size_ratio = box.cfg.vinyl_run_size_ratio,
         }
     else
         options_defaults = {}

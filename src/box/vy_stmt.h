@@ -88,11 +88,12 @@ struct vy_stmt {
 	/**
 	 * Number of UPSERT statements for the same key preceding
 	 * this statement. Used to trigger upsert squashing in the
-	 * background (see vy_range_set_upsert()).
-	 */
-	uint8_t n_upserts;
-	/** Offsets count before MessagePack data. */
-	/**
+	 * background (see vy_range_set_upsert()). This member is
+	 * stored only for UPSERT statements in the extra memory
+	 * space before offsets table.
+	 *
+	 *     uint8_t n_upserts;
+	 *
 	 * Offsets array concatenated with MessagePack fields
 	 * array.
 	 * char raw[0];
@@ -131,14 +132,19 @@ vy_stmt_set_type(struct tuple *stmt, enum iproto_type type)
 static inline uint8_t
 vy_stmt_n_upserts(const struct tuple *stmt)
 {
-	return ((const struct vy_stmt *) stmt)->n_upserts;
+	assert(tuple_format(stmt)->extra_size == sizeof(uint8_t));
+	return *((const uint8_t *) tuple_extra(stmt));
 }
 
 /** Set upserts count of the vinyl statement. */
 static inline void
 vy_stmt_set_n_upserts(struct tuple *stmt, uint8_t n)
 {
-	((struct vy_stmt *) stmt)->n_upserts = n;
+	struct tuple_format *format = tuple_format(stmt);
+	assert(format->extra_size == sizeof(uint8_t));
+	char *extra = (char *) stmt + stmt->data_offset -
+		      tuple_format_meta_size(format);
+	*((uint8_t *) extra) = n;
 }
 
 /** Get the column mask of the specified tuple. */
@@ -180,13 +186,40 @@ void
 vy_tuple_delete(struct tuple_format *format, struct tuple *tuple);
 
 /**
- * Duplicate statememnt.
+ * Duplicate the statememnt.
  *
  * @param stmt statement
  * @return new statement of the same type with the same data.
  */
 struct tuple *
 vy_stmt_dup(const struct tuple *stmt, struct tuple_format *format);
+
+struct lsregion;
+
+/**
+ * Duplicate the statement, using the lsregion as allocator.
+ * @param stmt      Statement to duplicate.
+ * @param lsregion  Allocator.
+ * @param alloc_lsn Allocation identifier for the lsregion.
+ *
+ * @retval not NULL The new statement with the same data.
+ * @retval     NULL Memory error.
+ */
+struct tuple *
+vy_stmt_dup_lsregion(const struct tuple *stmt, struct lsregion *lsregion,
+		     int64_t alloc_lsn);
+
+/**
+ * Return true if @a stmt was allocated on lsregion.
+ * @param stmt a statement
+ * @retval true if @a stmt was allocated on lsregion
+ * @retval false otherwise
+ */
+static inline bool
+vy_stmt_is_region_allocated(const struct tuple *stmt)
+{
+	return stmt->refs == 0;
+}
 
 /**
  * Specialized comparators are faster than general-purpose comparators.
@@ -407,12 +440,14 @@ vy_stmt_new_upsert(struct tuple_format *format,
 /**
  * Create REPLACE statement from UPSERT statement.
  *
- * @param upsert upsert statement.
+ * @param replace_format Format for new REPLACE statement.
+ * @param upsert         Upsert statement.
  * @retval not NULL Success.
  * @retval     NULL Memory error.
  */
 struct tuple *
-vy_stmt_replace_from_upsert(const struct tuple *upsert);
+vy_stmt_replace_from_upsert(struct tuple_format *replace_format,
+			    const struct tuple *upsert);
 
 /**
  * Extract MessagePack data from the REPLACE/UPSERT statement.
@@ -425,6 +460,8 @@ static inline const char *
 vy_upsert_data_range(const struct tuple *tuple, uint32_t *p_size)
 {
 	assert(vy_stmt_type(tuple) == IPROTO_UPSERT);
+	/* UPSERT must have the n_upserts field. */
+	assert(tuple_format(tuple)->extra_size == sizeof(uint8_t));
 	const char *mp = tuple_data(tuple);
 	assert(mp_typeof(*mp) == MP_ARRAY);
 	const char *mp_end = mp;
@@ -450,21 +487,6 @@ vy_stmt_upsert_ops(const struct tuple *tuple, uint32_t *mp_size)
 	*mp_size = tuple_data(tuple) + tuple->bsize - mp;
 	return mp;
 }
-
-/**
- * Extract a SELECT statement with only indexed fields from raw data.
- * @param stmt Raw data of struct vy_stmt.
- * @param key_def key definition.
- * @param a region for temporary allocations. Automatically shrinked
- * to the original size.
- *
- * @retval not NULL Success.
- * @retval NULL Memory allocation error.
- */
-struct tuple *
-vy_stmt_extract_key(const struct tuple *stmt, const struct key_def *key_def,
-		    struct region *gc);
-
 
 /**
  * Create the SELECT statement from MessagePack array.

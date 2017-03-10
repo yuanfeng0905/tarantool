@@ -80,7 +80,7 @@ struct xdir {
 	 * partial or corrupt rows. Incorrect objects
 	 * are skipped.
 	 */
-	bool panic_if_error;
+	bool force_recovery;
 
 	/**
 	 * true if a log file in this directory can by fsync()ed
@@ -96,13 +96,13 @@ struct xdir {
 	 */
 	int open_wflags;
 	/**
-	 * A pointer to this server uuid. If not assigned
-	 * (tt_uuid_is_nil returns true), server id check
+	 * A pointer to this instance uuid. If not assigned
+	 * (tt_uuid_is_nil returns true), instance id check
 	 * for logs in this directory is not performed.
 	 * Otherwise, any log in this directory must have
-	 * the matching server id.
+	 * the matching instance id.
 	 */
-	const struct tt_uuid *server_uuid;
+	const struct tt_uuid *instance_uuid;
 	/**
 	 * Text of a marker written to the text file header:
 	 * XLOG (meaning it's a write ahead log) or SNAP (a
@@ -139,7 +139,7 @@ struct xdir {
  */
 void
 xdir_create(struct xdir *dir, const char *dirname, enum xdir_type type,
-	    const struct tt_uuid *server_uuid);
+	    const struct tt_uuid *instance_uuid);
 
 /**
  * Destroy a log dir object.
@@ -170,6 +170,30 @@ char *
 xdir_format_filename(struct xdir *dir, int64_t signature,
 		     enum log_suffix suffix);
 
+/**
+ * Return LSN of the newest file in a directory
+ * or -1 if the directory is empty.
+ */
+static inline int64_t
+xdir_last_vclock(struct xdir *xdir, struct vclock *vclock)
+{
+	struct vclock *last = vclockset_last(&xdir->index);
+	if (last == NULL)
+		return -1;
+	vclock_copy(vclock, last);
+	return vclock_sum(vclock);
+}
+
+/**
+ * Insert a vclock into the file index of a directory.
+ * The vclock must be allocated with malloc.
+ */
+static inline void
+xdir_add_vclock(struct xdir *xdir, struct vclock *vclock)
+{
+	vclockset_insert(&xdir->index, vclock);
+}
+
 /* }}} */
 
 /* {{{ xlog meta */
@@ -181,12 +205,12 @@ struct xlog_meta {
 	/** Text file header: filetype */
 	char filetype[10];
 	/**
-	 * Text file header: server uuid. We read
+	 * Text file header: instance uuid. We read
 	 * only logs with our own uuid, to avoid situations
 	 * when a DBA has manually moved a few logs around
 	 * and messed the data directory up.
 	 */
-	struct tt_uuid server_uuid;
+	struct tt_uuid instance_uuid;
 	/**
 	 * Text file header: vector clock taken at the time
 	 * this file was created. For WALs, this is vector
@@ -280,7 +304,7 @@ struct xlog {
  *
  * @param xdir xdir
  * @param[out] xlog xlog structure
- * @param server uuid   the server which created the file
+ * @param instance uuid   the instance which created the file
  * @param vclock        the global state of replication (vector
  *			clock) at the moment the file is created.
  *
@@ -554,7 +578,7 @@ xlog_cursor_next_row(struct xlog_cursor *cursor, struct xrow_header *xrow);
  */
 int
 xlog_cursor_next(struct xlog_cursor *cursor,
-		 struct xrow_header *xrow, bool panic_if_error);
+		 struct xrow_header *xrow, bool force_recovery);
 
 /**
  * Move to the next xlog tx
@@ -593,7 +617,7 @@ xdir_open_cursor(struct xdir *dir, int64_t signature,
  * XlogError is raised when there is an error with contents
  * of the data directory or a log file. A special subclass
  * of exception is introduced to gracefully skip such errors
- * in panic_if_error = false mode.
+ * in force_recovery = true mode.
  */
 struct XlogError: public Exception
 {
@@ -668,9 +692,9 @@ xlog_cursor_open_xc(struct xlog_cursor *cursor, const char *name)
  */
 static inline int
 xlog_cursor_next_xc(struct xlog_cursor *cursor,
-		    struct xrow_header *xrow, bool panic_if_error)
+		    struct xrow_header *xrow, bool force_recovery)
 {
-	int rc = xlog_cursor_next(cursor, xrow, panic_if_error);
+	int rc = xlog_cursor_next(cursor, xrow, force_recovery);
 	if (rc == -1)
 		diag_raise();
 	return rc;

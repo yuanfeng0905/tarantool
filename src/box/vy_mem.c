@@ -63,7 +63,8 @@ vy_mem_tree_extent_free(void *ctx, void *p)
 struct vy_mem *
 vy_mem_new(struct key_def *key_def, struct lsregion *allocator,
 	   const int64_t *allocator_lsn, struct tuple_format *format,
-	   struct tuple_format *format_with_colmask)
+	   struct tuple_format *format_with_colmask,
+	   struct tuple_format *upsert_format)
 {
 	struct vy_mem *index = malloc(sizeof(*index));
 	if (!index) {
@@ -82,6 +83,8 @@ vy_mem_new(struct key_def *key_def, struct lsregion *allocator,
 	tuple_format_ref(format, 1);
 	index->format_with_colmask = format_with_colmask;
 	tuple_format_ref(format_with_colmask, 1);
+	index->upsert_format = upsert_format;
+	tuple_format_ref(upsert_format, 1);
 	vy_mem_tree_create(&index->tree, key_def, vy_mem_tree_extent_alloc,
 			   vy_mem_tree_extent_free, index);
 	rlist_create(&index->in_frozen);
@@ -91,15 +94,19 @@ vy_mem_new(struct key_def *key_def, struct lsregion *allocator,
 
 void
 vy_mem_update_formats(struct vy_mem *mem, struct tuple_format *new_format,
-		      struct tuple_format *new_format_with_colmask)
+		      struct tuple_format *new_format_with_colmask,
+		      struct tuple_format *new_upsert_format)
 {
 	assert(mem->used == 0);
 	tuple_format_ref(mem->format, -1);
 	tuple_format_ref(mem->format_with_colmask, -1);
+	tuple_format_ref(mem->upsert_format, -1);
 	mem->format = new_format;
 	mem->format_with_colmask = new_format_with_colmask;
+	mem->upsert_format = new_upsert_format;
 	tuple_format_ref(mem->format, 1);
 	tuple_format_ref(mem->format_with_colmask, 1);
+	tuple_format_ref(mem->upsert_format, 1);
 }
 
 void
@@ -107,6 +114,7 @@ vy_mem_delete(struct vy_mem *index)
 {
 	tuple_format_ref(index->format, -1);
 	tuple_format_ref(index->format_with_colmask, -1);
+	tuple_format_ref(index->upsert_format, -1);
 	TRASH(index);
 	free(index);
 }
@@ -132,31 +140,17 @@ vy_mem_older_lsn(struct vy_mem *mem, const struct tuple *stmt)
 }
 
 int
-vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt, int64_t alloc_lsn)
+vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt)
 {
+	/* Check if the statement can be inserted in the vy_mem. */
+	assert(stmt->format_id == tuple_format_id(mem->format_with_colmask) ||
+	       stmt->format_id == tuple_format_id(mem->format) ||
+	       stmt->format_id == tuple_format_id(mem->upsert_format));
+	/* The statement must be from a lsregion. */
+	assert(vy_stmt_is_region_allocated(stmt));
 	size_t size = tuple_size(stmt);
-	struct tuple *mem_stmt;
-	mem_stmt = lsregion_alloc(mem->allocator, size, alloc_lsn);
-	if (mem_stmt == NULL) {
-		diag_set(OutOfMemory, size, "lsregion_alloc", "mem_stmt");
-		return -1;
-	}
-	memcpy(mem_stmt, stmt, size);
-	/*
-	 * Region allocated statements can't be referenced or unreferenced
-	 * because they are located in monolithic memory region. Referencing has
-	 * sense only for separately allocated memory blocks.
-	 * The reference count here is set to 0 for an assertion if somebody
-	 * will try to unreference this statement.
-	 */
-	mem_stmt->refs = 0;
-	if (tuple_format(stmt)->extra_size == sizeof(uint64_t))
-		mem_stmt->format_id = tuple_format_id(mem->format_with_colmask);
-	else
-		mem_stmt->format_id = tuple_format_id(mem->format);
-
 	const struct tuple *replaced_stmt = NULL;
-	int rc = vy_mem_tree_insert(&mem->tree, mem_stmt, &replaced_stmt);
+	int rc = vy_mem_tree_insert(&mem->tree, stmt, &replaced_stmt);
 	if (rc != 0)
 		return -1;
 

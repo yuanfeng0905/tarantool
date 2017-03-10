@@ -66,16 +66,18 @@ struct wal_request {
 };
 
 int64_t
-wal_write(struct wal_writer *writer, struct wal_request *req);
-
-
-void
-wal_writer_start(enum wal_mode wal_mode, const char *wal_dirname,
-		 const struct tt_uuid *server_uuid, struct vclock *vclock,
-		 int64_t rows_per_wal);
+wal_write(struct wal_request *req);
 
 void
-wal_writer_stop();
+wal_thread_start();
+
+void
+wal_init(enum wal_mode wal_mode, const char *wal_dirname,
+	 const struct tt_uuid *instance_uuid, struct vclock *vclock,
+	 int64_t rows_per_wal);
+
+void
+wal_thread_stop();
 
 struct wal_watcher
 {
@@ -90,11 +92,10 @@ struct wal_watcher
  * Fails (-1) if recovery is NULL or lacking a WAL writer.
  */
 int
-wal_set_watcher(struct wal_writer *, struct wal_watcher *,
-		struct ev_async *);
+wal_set_watcher(struct wal_watcher *, struct ev_async *);
 
 void
-wal_clear_watcher(struct wal_writer *, struct wal_watcher *);
+wal_clear_watcher(struct wal_watcher *);
 
 void
 wal_atfork();
@@ -110,8 +111,7 @@ extern "C" {
  *
  */
 void
-wal_checkpoint(struct wal_writer *writer, struct vclock *vclock,
-	       bool rotate);
+wal_checkpoint(struct vclock *vclock, bool rotate);
 
 #if defined(__cplusplus)
 } /* extern "C" */
