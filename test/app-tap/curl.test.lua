@@ -60,11 +60,9 @@ test:test("basic http post/get", function(test)
 
 
 	local st = http:stat()
-	local pst = http:pool_stat()
 	test:ok(st.sockets_added == st.sockets_deleted and
-			st.active_requests == 0 and
-			pst.pool_size == 1 and
-			pst.free == pst.pool_size, "stats checking")
+			st.active_requests == 0 
+			, "stats checking")
 	-- issue https://github.com/tarantool/curl/issues/3
 	local data = {a = 'b'}
 	local headers = {}
@@ -100,7 +98,7 @@ end)
 
 
 test:test("tests with server", function(test)
-	test:plan(6)
+	test:plan(5)
 	local fiber = require('fiber')
 
 
@@ -121,7 +119,7 @@ test:test("tests with server", function(test)
 	http:free()
 
 
-	local num	  = 10
+	local num = 10
 	local curls   = { }
 	local headers = { }
 
@@ -132,14 +130,14 @@ test:test("tests with server", function(test)
 
 	for i = 1, num do
 	  table.insert(curls, {url = host .. '/',
-						   http = curl.http(),
-						   body = json.encode({stat = box.stat(),
-											   info = box.info() }),
-						   headers = headers,
-						   connect_timeout = 5,
-						   read_timeout = 5,
-						   dns_cache_timeout = 1,
-						  } )
+		http = curl.http(),
+		body = json.encode({stat = box.stat(),
+		info = box.info() }),
+		headers = headers,
+		connect_timeout = 5,
+		read_timeout = 5,
+		dns_cache_timeout = 1,
+		} )
 	end
 	-- ]]
 
@@ -151,27 +149,26 @@ test:test("tests with server", function(test)
 	  for j = 1, 10 do
 		  fiber.create(function()
 			  obj.http:post(obj.url, obj.body,
-								{headers = obj.headers,
-								 keepalive_idle = 30,
-								 keepalive_interval = 60,
-								 connect_timeout = obj.connect_timeout,
-								 read_timeout = obj.read_timeout,
-								 dns_cache_timeout = obj.dns_cache_timeout, })
+				{headers = obj.headers,
+				keepalive_idle = 30,
+				keepalive_interval = 60,
+				connect_timeout = obj.connect_timeout,
+				read_timeout = obj.read_timeout,
+				dns_cache_timeout = obj.dns_cache_timeout, })
 		  end )
 		  fiber.create(function()
 			  obj.http:get(obj.url,
-								{headers = obj.headers,
-								 keepalive_idle = 30,
-								 keepalive_interval = 60,
-								 connect_timeout = obj.connect_timeout,
-								 read_timeout = obj.read_timeout,
-								 dns_cache_timeout = obj.dns_cache_timeout, })
+				{headers = obj.headers,
+				keepalive_idle = 30,
+				keepalive_interval = 60,
+				connect_timeout = obj.connect_timeout,
+				read_timeout = obj.read_timeout,
+				dns_cache_timeout = obj.dns_cache_timeout, })
 		  end )
 	  end
 	end
 	local ok_sockets_added = true
 	local ok_active = true
-	local ok_poolsize = true
 	local ok_timeout = true
 	-- Join test
 	fiber.create( function()
@@ -200,12 +197,6 @@ test:test("tests with server", function(test)
 				rest = 0
 			end
 
-			local pst = obj.http:pool_stat()
-			if pst.pool_size ~= pst.free then
-				ok_poolsize = false
-				rest = 0
-			end
-
 			obj.http:free()
 			rest = rest - 1
 			curls[i].http = nil
@@ -230,7 +221,6 @@ test:test("tests with server", function(test)
 	end)
 	fiber.sleep(1)
 	test:ok(ok_sockets_added, "Concurrent.Test free sockets")
-	test:ok(ok_poolsize, "Concurrent.Test poolsize and free fibers")
 	test:ok(ok_active, "Concurrent.Test no active requests")
 	test:ok(ok_timeout, "Concurrent.Test timeout not expired")
 

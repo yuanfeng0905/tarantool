@@ -1,3 +1,5 @@
+#ifndef CURL_LUA_H_INCLUDED
+#define CURL_LUA_H_INCLUDED 1
 /*
  * Copyright (C) 2016-2017 Tarantool AUTHORS: please see AUTHORS file.
  *
@@ -28,8 +30,6 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#ifndef CURL_LUA_H_INCLUDED
-#define CURL_LUA_H_INCLUDED 1
 
 
 #include <lua.h>

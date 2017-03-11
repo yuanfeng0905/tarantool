@@ -1,3 +1,5 @@
+#ifndef DRIVER_H_INCLUDED
+#define DRIVER_H_INCLUDED 1
 /*
  * Copyright (C) 2016 - 2017 Tarantool AUTHORS: please see AUTHORS file.
  *
@@ -29,43 +31,84 @@
  * SUCH DAMAGE.
  */
 
-#ifndef DRIVER_H_INCLUDED
-#define DRIVER_H_INCLUDED 1
 
-#include "say.h"
+#include <diag.h>
 #include "curl/curl.h"
-#include "fiber.h"
 #include "small/ibuf.h"
+#include "small/mempool.h"
+#include <ipc.h>
+
 /*
  * Structures {{{
 */
 
-struct curl_args_t {
-	/* Set to true to enable pipelining for this multi handle */
-	bool pipeline;
 
-	/* Maximum number of entries in the Connection cache */
-	long max_conns;
 
-	/* Size of pool of requests, number of request
-	 * can be performed simultaneously */
-	size_t pool_size;
+struct curl_ctx {
 
-	/* Size of buffers on reading response */
-	size_t buffer_size;
+	struct ev_loop	*loop;
+	struct ev_timer timer_event;
+
+	CURLM	*multi;
+	int 	still_running;
+
+	struct mempool req_pool;
+	struct mempool resp_pool;
+
+	/* Various values of statistics, they are used only for all
+	 * Connection in curl context */
+	struct {
+	uint64_t total_requests;
+	uint64_t http_200_responses;
+	uint64_t http_other_responses;
+	size_t	 failed_requests;
+	size_t	 active_requests;
+	size_t	 sockets_added;
+	size_t	 sockets_deleted;
+	} stat;
+
+	bool done;
 };
 
 /*
  * Structure header need to be filled before sending.
  * Two strings without delimeter.
  */
-struct header {
-	const char* key;
-	const char* value;
+struct curl_header {
+	const char *key;
+	const char *value;
 };
 
-struct curl_request_args_t {
+struct curl_request {
 
+	/** Information associated with a specific easy handle */
+	CURL *easy;
+
+	/* Reference to curl context */
+	struct curl_ctx *ctx;
+
+	/* HTTP headers */
+	struct curl_slist *headers;
+
+	struct {
+	/* Buffer for headers and response	*/
+	struct ibuf headers_buf;
+	struct ibuf body_buf;
+
+	int curl_code;
+	int http_code;
+	const char *errmsg;
+	} response;
+
+	/* body to send to server and its length*/
+	const char *body;
+	size_t read;
+	size_t sent;
+
+	struct ipc_cond cond;
+
+	const char *url;
+	const char *method;
 	/* Max amount of cached alive Connections */
 	long max_conns;
 
@@ -100,87 +143,22 @@ struct curl_request_args_t {
 
 	/* Path to directory holding one or more certificates
 	 * to verify the peer with*/
-	const char* ca_path;
+	const char *ca_path;
 
 	/* File holding one or more certificates
 	 * to verify the peer with*/
-	const char* ca_file;
+	const char *ca_file;
 
-	/* Body of request*/
-	const char* body;
-	/* Headers or request*/
-	struct header* headers;
-};
-
-struct curl_request_pool_t{
-	struct	curl_request_t *mem;
-	size_t	size;
-};
-
-struct internal_ctx_t {
-
-	struct ev_loop	*loop;
-	struct ev_timer timer_event;
-
-	struct	curl_request_pool_t cpool;
-
-	CURLM	*multi;
-	int 	still_running;
-
-	/* Various values of statistics, they are used only for all
-	 * Connection in curl context */
-	struct {
-	uint64_t total_requests;
-	uint64_t http_200_responses;
-	uint64_t http_other_responses;
-	size_t	 failed_requests;
-	size_t	 active_requests;
-	size_t	 sockets_added;
-	size_t	 sockets_deleted;
-	} stat;
-};
-
-struct curl_ctx_t{
-	struct internal_ctx_t *internal_ctx;
-	bool done;
 };
 
 
-struct curl_request_t {
-
-	/* pool meta info */
-	struct {
-	size_t idx;
-	bool busy;
-	} pool;
-
-	/** Information associated with a specific easy handle */
-	CURL *easy;
-
-	/* Reference to internal context */
-	struct internal_ctx_t *internal_ctx;
-
-	/* HTTP headers */
-	struct curl_slist *headers;
-
-	struct {
-	/* Buffer for headers and response	*/
-	struct ibuf headers_buf;
-	struct ibuf body_buf;
-
+struct curl_response {
 	int curl_code;
 	int http_code;
+	char *headers;
+	char *body;
 	const char *errmsg;
-	} response;
-
-	/* body to send to server and its length*/
-	const char *body;
-	size_t read;
-	size_t sent;
-
-	struct ipc_cond *cond;
 };
-
 
 /*
  * }}} Structures
@@ -190,11 +168,15 @@ struct curl_request_t {
  * Curl context API
  * {{{
  */
-struct curl_ctx_t*
-curl_new(bool pipeline, long max_conn, long pool_size, long buffer_size);
+
+/* max_conn - Maximum number of entries in the Connection cache */
+/* pipeline - Set to true to enable pipelining for this multi handle */
+
+struct curl_ctx*
+curl_ctx_create(struct curl_ctx *,bool, long);
 
 void
-curl_delete(struct curl_ctx_t *ctx);
+curl_ctx_destroy(struct curl_ctx *);
 
 /* }}}
  */
@@ -204,28 +186,8 @@ curl_delete(struct curl_ctx_t *ctx);
  * {{{
  */
 
-static inline
-void
-curl_request_args_init(struct curl_request_args_t *a)
-{
-	assert(a);
-	a->max_conns = -1;
-	a->keepalive_idle = -1;
-	a->keepalive_interval = -1;
-	a->low_speed_time = -1;
-	a->low_speed_limit = -1;
-	a->read_timeout = -1;
-	a->connect_timeout = -1;
-	a->dns_cache_timeout = -1;
-	a->curl_verbose = false;
-	a->ca_path = NULL;
-	a->ca_file = NULL;
-	a->body = NULL;
-	a->headers = NULL;
-}
-
 /*
-	 <curl_send_request> This function does async HTTP request
+	 <curl_request_execute> This function does async HTTP request
 
 	Parameters:
 
@@ -272,63 +234,158 @@ curl_request_args_init(struct curl_request_args_t *a)
 		You can get needed data with according functions
 */
 
-struct curl_request_t*
-curl_send_request(struct curl_ctx_t *ctx, const char* method, const char* url,
-		const struct curl_request_args_t* args);
+struct curl_request*
+curl_request_new(struct curl_ctx *ctx, size_t size_buf);
 
-static inline
-char*
-get_headers(struct curl_request_t* r)
+struct curl_response*
+curl_request_execute(struct curl_request *);
+
+void
+curl_request_delete(struct curl_request *r);
+
+static inline void
+curl_response_destroy(struct curl_ctx *ctx ,struct curl_response *resp) {
+	mempool_free(&ctx->resp_pool, resp);
+}
+
+static inline void
+curl_set_method(struct curl_request *req, const char *method)
 {
-	if (ibuf_used(&r->response.headers_buf) <= 0)
+	req->method = method;
+}
+
+static inline void
+curl_set_url(struct curl_request *req, const char *url)
+{
+	req->url = url;
+}
+
+int
+curl_set_headers(struct curl_request *, struct curl_header *);
+
+static inline void
+curl_set_body(struct curl_request *req, const char *body)
+{
+	assert(body);
+	req->body = body;
+	req->read = strlen(body);
+	req->sent = 0;
+}
+
+static inline void
+curl_set_max_conns(struct curl_request *req, long max_conns)
+{
+	req->max_conns = max_conns;
+}
+
+static inline void
+curl_set_keepalive_idle(struct curl_request *req, long keepalive_idle)
+{
+	req->keepalive_idle = keepalive_idle;
+}
+
+static inline void
+curl_set_keepalive_interval(struct curl_request *req, long keepalive_interval)
+{
+	req->keepalive_interval = keepalive_interval;
+}
+
+static inline void
+curl_set_low_speed_time(struct curl_request *req, long low_speed_time)
+{
+	req->low_speed_time = low_speed_time;
+}
+
+static inline void
+curl_set_low_speed_limit(struct curl_request *req, long low_speed_limit)
+{
+	req->low_speed_limit = low_speed_limit;
+}
+
+static inline void
+curl_set_read_timeout(struct curl_request *req, long read_timeout)
+{
+	req->read_timeout = read_timeout;
+}
+
+static inline void
+curl_set_connect_timeout(struct curl_request *req, long connect_timeout)
+{
+	req->connect_timeout = connect_timeout;
+}
+
+static inline void
+curl_set_dns_cache_timeout(struct curl_request *req, long dns_cache_timeout)
+{
+	req->dns_cache_timeout = dns_cache_timeout;
+}
+
+static inline void
+curl_set_verbose(struct curl_request *req, bool curl_verbose)
+{
+	req->curl_verbose = curl_verbose;
+}
+
+static inline void
+curl_set_ca_path(struct curl_request *req, const char *ca_path)
+{
+	req->ca_path = ca_path;
+}
+
+static inline void
+curl_set_ca_file(struct curl_request *req, const char *ca_file)
+{
+	req->ca_file = ca_file;
+}
+
+static inline char*
+curl_get_headers(struct curl_request *req)
+{
+	if (ibuf_used(&req->response.headers_buf) <= 0)
 		return NULL;
 
-	char* p = (char*) ibuf_alloc(&r->response.headers_buf, 1);
-	if (!p) {
-		say(S_ERROR, "in %s:%d \
-				can't allocate memory for input buffer\n",
-				__FILE__, __LINE__);
+	char *bufp = (char *) ibuf_alloc(&req->response.headers_buf, 1);
+	if (!bufp) {
+		diag_set(OutOfMemory, 1, "ibuf_alloc", "curl");
 		return NULL;
 	}
-	*p = 0;
-	return r->response.headers_buf.buf;
+	*bufp = 0;
+	return req->response.headers_buf.buf;
 }
 
 static inline
 char*
-get_body(struct curl_request_t* r)
+curl_get_body(struct curl_request *req)
 {
-	if (ibuf_used(&r->response.body_buf) <= 0)
+	if (ibuf_used(&req->response.body_buf) <= 0)
 		return NULL;
 
-	char* p = (char*) ibuf_alloc(&r->response.body_buf, 1);
-	if (!p) {
-		say(S_ERROR, "in %s:%d \
-				can't allocate memory for input buffer\n",
-				__FILE__, __LINE__);
+	char *bufp = (char *) ibuf_alloc(&req->response.body_buf, 1);
+	if (!bufp) {
+		diag_set(OutOfMemory, 1, "ibuf_alloc", "curl");
 		return NULL;
 	}
-	*p = 0;
-	return r->response.body_buf.buf;
+	*bufp = 0;
+	return req->response.body_buf.buf;
 }
 
 static inline
 int
-get_http_code(struct curl_request_t* r)
+get_http_code(struct curl_request *r)
 {
 	return r->response.http_code;
 }
 
 static inline
 const char*
-get_errmsg(struct curl_request_t* r)
+get_errmsg(struct curl_request *r)
 {
 	return r->response.errmsg;
 }
 
 static inline
 bool
-curl_request_add_header(struct curl_request_t *c, const char *http_header)
+curl_request_add_header(struct curl_request *c, const char *http_header)
 {
 	assert(c);
 	assert(http_header);
@@ -339,8 +396,6 @@ curl_request_add_header(struct curl_request_t *c, const char *http_header)
 	return true;
 }
 
-void
-curl_request_delete(struct curl_ctx_t* ctx, struct curl_request_t *r);
 
 /*
  * }}}
@@ -349,23 +404,6 @@ curl_request_delete(struct curl_ctx_t* ctx, struct curl_request_t *r);
 /* Some methods used for Lua API
  * {{{
  */
-
-struct internal_ctx_t*
-curl_ctx_new(const struct curl_args_t *a);
-
-void
-curl_ctx_delete(struct internal_ctx_t *l);
-
-/* request pool API
- * used for stat info
- */
-
-size_t
-curl_request_pool_get_free_size(struct curl_request_pool_t *p);
-
-void
-curl_request_pool_free_request(struct curl_request_pool_t *p,
-		struct curl_request_t *c);
 
 /*
  * }}}
