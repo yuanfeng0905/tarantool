@@ -96,9 +96,11 @@ struct curl_request {
 
 	/* HTTP headers */
 	struct curl_slist *headers;
-
-	/* Internal struct for storing response data */
-	struct {
+	
+	/*
+	 * Response attributes
+	 * {{{
+	 */
 	/* Buffers for headers and body */
 	struct ibuf headers_buf;
 	struct ibuf body_buf;
@@ -109,7 +111,8 @@ struct curl_request {
 
 	/* error message */
 	const char *errmsg;
-	} response;
+	/*}}}
+	 */
 
 	/* body to send to server, its length, number of bytes sent to server */
 	const char *body;

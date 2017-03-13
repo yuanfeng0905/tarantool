@@ -56,7 +56,7 @@ static inline
 int
 curl_request_add_header_keepalive(struct curl_request *req)
 {
-	static char buf[255];
+	static char buf[30];
 
 	assert(req);
 
@@ -71,7 +71,7 @@ int
 curl_request_add_header_content_length(struct curl_request *req)
 {
 	assert(req);
-	char buf[20];
+	char buf[38];
 	snprintf(buf, sizeof(buf) - 1, "%s: %zu", "Content-Length", req->read);
 
 	return curl_request_add_header(req, buf);
@@ -168,8 +168,7 @@ is_mcode_good(CURLMcode code)
 
 /** Update the event timer after curl_multi library calls
  */
-static
-int
+static int
 curl_multi_timer_cb(CURLM *multi __attribute__((unused)),
 				long timeout_ms,
 				void *ctx)
@@ -191,8 +190,7 @@ curl_multi_timer_cb(CURLM *multi __attribute__((unused)),
 
 /** Check for completed transfers, and remove their easy handles
  */
-static
-void
+static void
 curl_check_multi_info(struct curl_ctx *l)
 {
 	char *eff_url;
@@ -224,9 +222,9 @@ curl_check_multi_info(struct curl_ctx *l)
 		else
 			++l->stat.http_other_responses;
 
-		req->response.curl_code = (int) curl_code;
-		req->response.http_code = (int) http_code;
-		req->response.errmsg = curl_easy_strerror(curl_code);
+		req->curl_code = (int) curl_code;
+		req->http_code = (int) http_code;
+		req->errmsg = curl_easy_strerror(curl_code);
 		ipc_cond_signal(&req->cond);
 	} /* while */
 }
@@ -234,8 +232,7 @@ curl_check_multi_info(struct curl_ctx *l)
 
 /** Called by libevent when we get action on a multi socket
  */
-static
-void
+static void
 curl_event_cb(EV_P_ struct ev_io *w, int revents)
 {
 	(void) loop;
@@ -260,8 +257,7 @@ curl_event_cb(EV_P_ struct ev_io *w, int revents)
 
 /** Called by libevent when our timeout expires
  */
-static
-void
+static void
 curl_timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
 {
 	(void) loop;
@@ -279,8 +275,7 @@ curl_timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
 
 /** Clean up the curl_sock structure
  */
-static inline
-void
+static inline void
 curl_remove_sock(struct curl_sock *f, struct curl_ctx *l)
 {
 	say_debug("removing socket");
@@ -299,8 +294,7 @@ curl_remove_sock(struct curl_sock *f, struct curl_ctx *l)
 
 /** Assign information to a curl_sock structure
  */
-static inline
-void
+static inline void
 curl_set_sock(struct curl_sock *f,
 		curl_socket_t s,
 		CURL *e,
@@ -426,7 +420,7 @@ curl_write_cb(char *ptr, size_t size, size_t nmemb, void *ctx)
 	struct curl_request *req = (struct curl_request *) ctx;
 	const size_t bytes = size * nmemb;
 
-	return curl_push_buffer(&req->response.body_buf, ptr, bytes);
+	return curl_push_buffer(&req->body_buf, ptr, bytes);
 }
 
 /* Called on recieving headers action.
@@ -437,7 +431,7 @@ curl_header_cb(char *buffer, size_t size, size_t nitems, void *ctx)
 	say_debug("size = %zu, mitems = %zu", size, nitems);
 	struct curl_request *req = (struct curl_request *) ctx;
 	const size_t bytes = size * nitems;
-	return curl_push_buffer(&req->response.headers_buf, buffer, bytes);
+	return curl_push_buffer(&req->headers_buf, buffer, bytes);
 }
 
 /* Initiates the request */
@@ -545,33 +539,33 @@ curl_get_response(struct curl_request *req)
 		return NULL;
 	}
 
-	resp->curl_code = req->response.curl_code;
-	resp->http_code = req->response.http_code;
-	resp->errmsg = req->response.errmsg;
+	resp->curl_code = req->curl_code;
+	resp->http_code = req->http_code;
+	resp->errmsg = req->errmsg;
 	resp->body = NULL;
 	resp->headers = NULL;
 	char *bufp;
 
-	if (ibuf_used(&req->response.headers_buf) > 0) {
+	if (ibuf_used(&req->headers_buf) > 0) {
 
-		bufp = (char *) ibuf_alloc(&req->response.headers_buf, 1);
+		bufp = (char *) ibuf_alloc(&req->headers_buf, 1);
 		if (!bufp) {
 			diag_set(OutOfMemory, 1, "ibuf_alloc", "curl");
 			return NULL;
 		}
 		*bufp = 0;
-		resp->headers = req->response.headers_buf.buf;
+		resp->headers = req->headers_buf.buf;
 	}
 
-	if (ibuf_used(&req->response.body_buf) > 0) {
+	if (ibuf_used(&req->body_buf) > 0) {
 
-		bufp = (char *) ibuf_alloc(&req->response.body_buf, 1);
+		bufp = (char *) ibuf_alloc(&req->body_buf, 1);
 		if (!bufp) {
 			diag_set(OutOfMemory, 1, "ibuf_alloc", "curl");
 			return NULL;
 		}
 		*bufp = 0;
-		resp->body = req->response.body_buf.buf;
+		resp->body = req->body_buf.buf;
 	}
 	return resp;
 }
@@ -786,9 +780,9 @@ curl_request_new(struct curl_ctx *ctx, size_t size_buf)
 		return NULL;
 	}
 
-	ibuf_create(&req->response.headers_buf, &cord()->slabc, size_buf);
+	ibuf_create(&req->headers_buf, &cord()->slabc, size_buf);
 
-	ibuf_create(&req->response.body_buf, &cord()->slabc, size_buf);
+	ibuf_create(&req->body_buf, &cord()->slabc, size_buf);
 
 	ipc_cond_create(&req->cond);
 
@@ -810,8 +804,8 @@ curl_request_delete(struct curl_request *req)
 		req->easy = NULL;
 	}
 
-	ibuf_destroy(&req->response.headers_buf);
-	ibuf_destroy(&req->response.body_buf);
+	ibuf_destroy(&req->headers_buf);
+	ibuf_destroy(&req->body_buf);
 
 	ipc_cond_destroy(&req->cond);
 	--req->ctx->stat.active_requests;

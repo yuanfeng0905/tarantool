@@ -24,11 +24,10 @@ ok - basic http post/get
     # special methods: end
 ok - special methods
     # tests with server
-    1..6
+    1..5
     ok - HTTP:TRACE request
     ok - HTTP:CONNECT request
     ok - Concurrent.Test free sockets
-    ok - Concurrent.Test poolsize and free fibers
     ok - Concurrent.Test no active requests
     ok - Concurrent.Test timeout not expired
     # tests with server: end

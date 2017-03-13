@@ -366,7 +366,6 @@ new(lua_State *L)
 	return 1;
 }
 
-
 static int
 cleanup(lua_State *L)
 {
@@ -394,17 +393,17 @@ static const struct luaL_Reg R[] = {
 };
 
 static const struct luaL_Reg M[] = {
-	{"luaT_curl_request", luaT_curl_request},
-	{"stat",		  get_stat},
-	{"free",		  cleanup},
+	{"luaT_curl_request",	luaT_curl_request},
+	{"stat",		get_stat},
+	{"free",		cleanup},
+	{"__gc",		cleanup},
 	{NULL,			  NULL}
 };
 
 /*
  * Lib initializer
  */
-LUA_API
-int
+LUA_API int
 luaopen_curl_driver(lua_State *L)
 {
 	luaL_register_type(L, DRIVER_LUA_UDATA_NAME, M);
