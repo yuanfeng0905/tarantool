@@ -41,6 +41,7 @@
 #include <unistd.h>
 
 #include <msgpuck/msgpuck.h>
+#include <small/mempool.h>
 #include <small/region.h>
 #include <small/rlist.h>
 
@@ -157,18 +158,24 @@ struct vy_log {
 	int64_t next_range_id;
 	/** Next ID to use for a run. Used by vy_log_next_run_id(). */
 	int64_t next_run_id;
+	/** Mempool for struct vy_log_record. */
+	struct mempool record_pool;
 	/**
-	 * Index of the first record of the current
-	 * transaction in tx_buf.
+	 * Pointer to the first record of the current
+	 * transaction.
 	 */
-	int tx_begin;
+	struct vy_log_record *tx_begin;
+	/*
+	 * If set, the current transaction must be aborted on commit.
+	 * This flag is set if vy_log_write() failed to allocate space
+	 * for a new record.
+	 */
+	bool tx_failed;
 	/**
-	 * Index of the record following the last one
-	 * of the current transaction in tx_buf.
+	 * Records awaiting to be written to disk.
+	 * Linked by vy_log_record::in_tx;
 	 */
-	int tx_end;
-	/** Records awaiting to be written to disk. */
-	struct vy_log_record tx_buf[VY_LOG_TX_BUF_SIZE];
+	struct rlist tx;
 };
 
 /** Recovery context. */
@@ -595,6 +602,9 @@ vy_log_new(const char *dir, vy_log_gc_cb gc_cb, void *gc_arg)
 	}
 
 	latch_create(&log->latch);
+	mempool_create(&log->record_pool, cord_slab_cache(),
+			sizeof(struct vy_log_record));
+	rlist_create(&log->tx);
 
 	log->gc_cb = gc_cb;
 	log->gc_arg = gc_arg;
@@ -638,7 +648,7 @@ vy_log_open_or_create(struct vy_log *log);
 static int
 vy_log_flush(struct vy_log *log)
 {
-	if (log->tx_end == 0)
+	if (rlist_empty(&log->tx))
 		return 0; /* nothing to do */
 
 	/* Open the xlog on the first write. */
@@ -655,9 +665,10 @@ vy_log_flush(struct vy_log *log)
 	 * slab allocator.
 	 */
 	xlog_tx_begin(log->xlog);
-	for (int i = 0; i < log->tx_end; i++) {
+	struct vy_log_record *record;
+	rlist_foreach_entry(record, &log->tx, in_tx) {
 		struct xrow_header row;
-		if (vy_log_record_encode(&log->tx_buf[i], &row) < 0 ||
+		if (vy_log_record_encode(record, &row) < 0 ||
 		    xlog_write_row(log->xlog, &row) < 0) {
 			xlog_tx_rollback(log->xlog);
 			return -1;
@@ -677,7 +688,10 @@ vy_log_flush(struct vy_log *log)
 	}
 
 	/* Success. Reset the buffer. */
-	log->tx_end = 0;
+	struct vy_log_record *tmp;
+	rlist_foreach_entry_safe(record, &log->tx, in_tx, tmp)
+		mempool_free(&log->record_pool, record);
+	rlist_create(&log->tx);
 	return 0;
 }
 
@@ -738,6 +752,7 @@ vy_log_delete(struct vy_log *log)
 	}
 	if (log->recovery != NULL)
 		vy_recovery_delete(log->recovery);
+	mempool_destroy(&log->record_pool);
 	latch_destroy(&log->latch);
 	free(log->dir);
 	TRASH(log);
@@ -1027,7 +1042,8 @@ void
 vy_log_tx_begin(struct vy_log *log)
 {
 	latch_lock(&log->latch);
-	log->tx_begin = log->tx_end;
+	assert(log->tx_begin == NULL);
+	log->tx_failed = false;
 	say_debug("%s", __func__);
 }
 
@@ -1043,6 +1059,18 @@ vy_log_tx_do_commit(struct vy_log *log, bool no_discard)
 {
 	int rc = 0;
 
+	if (log->tx_failed) {
+		/*
+		 * vy_log_write() failed to allocate memory.
+		 * @no_discard transactions can't tolerate this.
+		 */
+		if (no_discard)
+			panic("failed to grow vinyl metadata log buffer");
+		diag_set(OutOfMemory, sizeof(struct vy_log_record),
+			 "ibuf", "struct vy_log_record");
+		goto fail;
+	}
+
 	assert(latch_owner(&log->latch) == fiber());
 	/*
 	 * During recovery, we may replay records we failed to commit
@@ -1053,18 +1081,35 @@ vy_log_tx_do_commit(struct vy_log *log, bool no_discard)
 	if (log->recovery != NULL)
 		goto out;
 
-	rc = vy_log_flush(log);
-	/*
-	 * Rollback the transaction on failure unless
-	 * we were explicitly told not to.
-	 */
-	if (rc != 0 && !no_discard)
-		log->tx_end = log->tx_begin;
+	if (vy_log_flush(log) < 0)
+		goto fail;
 out:
+	log->tx_begin = NULL;
 	say_debug("%s(no_discard=%d): %s", __func__, no_discard,
 		  rc == 0 ? "success" : "fail");
 	latch_unlock(&log->latch);
 	return rc;
+fail:
+	/*
+	 * Rollback the transaction on failure unless
+	 * we were explicitly told not to.
+	 */
+	if (!no_discard) {
+		struct vy_log_record *record = log->tx_begin;
+		while (record != NULL) {
+			struct vy_log_record *next;
+			if (record != rlist_last_entry(&log->tx,
+					struct vy_log_record, in_tx))
+				next = rlist_next_entry(record, in_tx);
+			else
+				next = NULL;
+			rlist_del_entry(record, in_tx);
+			mempool_free(&log->record_pool, record);
+			record = next;
+		}
+	}
+	rc = -1;
+	goto out;
 }
 
 int
@@ -1085,12 +1130,19 @@ vy_log_write(struct vy_log *log, const struct vy_log_record *record)
 	assert(latch_owner(&log->latch) == fiber());
 
 	say_debug("%s: %s", __func__, vy_log_record_str(record));
-	if (log->tx_end >= VY_LOG_TX_BUF_SIZE) {
-		latch_unlock(&log->latch);
-		panic("vinyl metadata log buffer overflow");
-	}
 
-	log->tx_buf[log->tx_end++] = *record;
+	if (log->tx_failed)
+		return;
+
+	struct vy_log_record *tx_record = mempool_alloc(&log->record_pool);
+	if (tx_record == NULL) {
+		log->tx_failed = true;
+		return;
+	}
+	*tx_record = *record;
+	rlist_add_tail_entry(&log->tx, tx_record, in_tx);
+	if (log->tx_begin == NULL)
+		log->tx_begin = tx_record;
 }
 
 /** Lookup an index in vy_recovery::index_hash map. */
