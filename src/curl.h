@@ -43,15 +43,19 @@
 */
 
 
-
+/* Context of curl */
 struct curl_ctx {
 
+	/* Libev loop and timer-watcher*/
 	struct ev_loop	*loop;
 	struct ev_timer timer_event;
 
+	/* Curl multi handler*/
 	CURLM	*multi;
+	/* State of request; Internal use */
 	int 	still_running;
 
+	/* Memory pools for requests and responses */
 	struct mempool req_pool;
 	struct mempool resp_pool;
 
@@ -75,13 +79,16 @@ struct curl_ctx {
  * Two strings without delimeter.
  */
 struct curl_header {
+	/* Name of header */
 	const char *key;
+
+	/* Value of header */
 	const char *value;
 };
 
 struct curl_request {
 
-	/** Information associated with a specific easy handle */
+	/* Information associated with a specific easy handle */
 	CURL *easy;
 
 	/* Reference to curl context */
@@ -90,25 +97,33 @@ struct curl_request {
 	/* HTTP headers */
 	struct curl_slist *headers;
 
+	/* Internal struct for storing response data */
 	struct {
-	/* Buffer for headers and response	*/
+	/* Buffers for headers and body */
 	struct ibuf headers_buf;
 	struct ibuf body_buf;
 
+	/* codes of response */
 	int curl_code;
 	int http_code;
+
+	/* error message */
 	const char *errmsg;
 	} response;
 
-	/* body to send to server and its length*/
+	/* body to send to server, its length, number of bytes sent to server */
 	const char *body;
 	size_t read;
 	size_t sent;
 
+	/* condition varaible for internal conditional loop */
 	struct ipc_cond cond;
-
+	/*url to send request to */
 	const char *url;
+
+	/* HTTP method */
 	const char *method;
+
 	/* Max amount of cached alive Connections */
 	long max_conns;
 
@@ -116,7 +131,7 @@ struct curl_request {
 	long keepalive_idle;
 	long keepalive_interval;
 
-	/*Set the "low speed limit & time"
+	/* Set the "low speed limit & time"
 	 If the download receives less than "low speed limit" bytes/second
 	 during "low speed time" seconds, the operations is aborted.
 	 You could i.e if you have a pretty high speed Connection,
@@ -142,21 +157,26 @@ struct curl_request {
 	bool curl_verbose;
 
 	/* Path to directory holding one or more certificates
-	 * to verify the peer with*/
+	 * to verify the peer with */
 	const char *ca_path;
 
 	/* File holding one or more certificates
-	 * to verify the peer with*/
+	 * to verify the peer with */
 	const char *ca_file;
 
 };
 
-
+/* Response structure. User gets it after executing request */
 struct curl_response {
+	/* Internal curl code */
 	int curl_code;
+	/* Http code */
 	int http_code;
+	/* Reference to string headers */
 	char *headers;
+	/* Reference to string body */
 	char *body;
+	/* Reference to error messsage */
 	const char *errmsg;
 };
 
@@ -169,12 +189,21 @@ struct curl_response {
  * {{{
  */
 
-/* max_conn - Maximum number of entries in the Connection cache */
-/* pipeline - Set to true to enable pipelining for this multi handle */
-
+/**
+ *\brief Creates new context.
+ *\param ctx pointer to allocated memory of structure ctx
+ *\param max_conn - Maximum number of entries in the Connection cache
+ *\param pipeline - Set to true to enable pipelining for this multi handle
+ *\return pointer to created context of NULL in case of error
+ */
 struct curl_ctx*
-curl_ctx_create(struct curl_ctx *,bool, long);
+curl_ctx_create(struct curl_ctx *ctx, bool pipeline, long max_conns);
 
+/**
+ *\brief destroy context object.
+ *\param ctx pointer to allocated memory of structure ctx
+ *\details doesn't free allocated memory
+ */
 void
 curl_ctx_destroy(struct curl_ctx *);
 
@@ -186,82 +215,75 @@ curl_ctx_destroy(struct curl_ctx *);
  * {{{
  */
 
-/*
-	 <curl_request_execute> This function does async HTTP request
-
-	Parameters:
-
-		method	- HTTP method, like GET, POST, PUT and so on
-		url - HTTP url, like https://tarantool.org/doc
-		req_args- this is a structure of options.
-
-			ca_path - a path to ssl certificate dir;
-
-			ca_file - a path to ssl certificate file;
-
-			headers - a structure of HTTP headers;
-
-			body - body of HTTP request;
-
-			max_conns - max amount of cached alive connections;
-
-			keepalive_idle & keepalive_interval - non-universal
-				keepalive knobs (Linux, AIX, HP-UX, more);
-
-			low_speed_time & low_speed_limit -
-				If the download receives less than
-				"low speed limit" bytes/second
-				during "low speed time" seconds,
-				the operations is aborted.
-				You could i.e if you have
-				a pretty high speed connection, abort if
-				it is less than 2000 bytes/sec during 20 seconds
-
-			read_timeout - Time-out the read operation
-					after this amount of seconds;
-
-			connect_timeout - Time-out connect operations after
-					this amount of seconds, if connects are;
-					OK within this time, then fine...
-					This only aborts the connect phase;
-
-			dns_cache_timeout - DNS cache timeout;
-
-			curl_verbose - make libcurl verbose!;
-
-		Returns:
-			 pointer structure curl_request_t
-		You can get needed data with according functions
-*/
-
+/**
+ * \brief Creates object of request
+ * \param ctx - reference to context
+ * \param size_buf - initial size of buffers on response
+ * \return new request object
+ */
 struct curl_request*
 curl_request_new(struct curl_ctx *ctx, size_t size_buf);
 
+/**
+ *\brief This function does async HTTP request
+ *\param request - reference to request object with filled fields
+ *\return pointer structure curl_response
+ *\details User recieves the reference to object response,
+ * which should be destroyed with curl_response_destroy() at the end
+ * Don't delete the request object before handling response!
+ * That will destroy some fields in response object.
+ */
 struct curl_response*
 curl_request_execute(struct curl_request *);
 
+/**
+ * \brief Delete request object
+ * \param request - reference to object
+ */
 void
-curl_request_delete(struct curl_request *r);
-
+curl_request_delete(struct curl_request *req);
+/**
+ * \brief Destroy the response object
+ * \param ctx - reference to context
+ * \param resp - reference to response object
+ */
 static inline void
 curl_response_destroy(struct curl_ctx *ctx ,struct curl_response *resp) {
 	mempool_free(&ctx->resp_pool, resp);
 }
 
+/**
+ * Setter field method.
+ * \param req - object request
+ * \param method - HTTP method, like GET, POST, PUT and so on
+ */
 static inline void
 curl_set_method(struct curl_request *req, const char *method)
 {
 	req->method = method;
 }
 
+/**
+ * Setter field url.
+ * \param req - object request
+ * \param url - HTTP url, like https://tarantool.org/doc
+ * */
 static inline void
 curl_set_url(struct curl_request *req, const char *url)
 {
 	req->url = url;
 }
 
+/**
+ * Setter field headers.
+ * \param req - object request
+ * \param headers - pointer to array of struct header
+ *  headers should be filled in advance
+ */
 int
 curl_set_headers(struct curl_request *, struct curl_header *);
+
+/* Other fields setters */
 
 static inline void
 curl_set_body(struct curl_request *req, const char *body)
@@ -338,74 +360,9 @@ curl_set_ca_file(struct curl_request *req, const char *ca_file)
 	req->ca_file = ca_file;
 }
 
-static inline char*
-curl_get_headers(struct curl_request *req)
-{
-	if (ibuf_used(&req->response.headers_buf) <= 0)
-		return NULL;
-
-	char *bufp = (char *) ibuf_alloc(&req->response.headers_buf, 1);
-	if (!bufp) {
-		diag_set(OutOfMemory, 1, "ibuf_alloc", "curl");
-		return NULL;
-	}
-	*bufp = 0;
-	return req->response.headers_buf.buf;
-}
-
-static inline
-char*
-curl_get_body(struct curl_request *req)
-{
-	if (ibuf_used(&req->response.body_buf) <= 0)
-		return NULL;
-
-	char *bufp = (char *) ibuf_alloc(&req->response.body_buf, 1);
-	if (!bufp) {
-		diag_set(OutOfMemory, 1, "ibuf_alloc", "curl");
-		return NULL;
-	}
-	*bufp = 0;
-	return req->response.body_buf.buf;
-}
-
-static inline
-int
-get_http_code(struct curl_request *r)
-{
-	return r->response.http_code;
-}
-
-static inline
-const char*
-get_errmsg(struct curl_request *r)
-{
-	return r->response.errmsg;
-}
-
-static inline
-bool
-curl_request_add_header(struct curl_request *c, const char *http_header)
-{
-	assert(c);
-	assert(http_header);
-	struct curl_slist *l = curl_slist_append(c->headers, http_header);
-	if (l == NULL)
-		return false;
-	c->headers = l;
-	return true;
-}
-
 
 /*
- * }}}
+ * }}} Request API
  */
 
-/* Some methods used for Lua API
- * {{{
- */
-
-/*
- * }}}
- */
 #endif /* DRIVER_H_INCLUDED */

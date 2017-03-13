@@ -242,16 +242,12 @@ curl_mt = {
 	--
 	--	failed_requests - this is a total number of requests which have
 	--		failed (included systeme erros, curl errors, HTTP
-	--		erros and so on)
+	--		errors and so on)
 	--	}
 	--	or error()
 	--
 	stat = function(self)
 		return self.curl:stat()
-	end,
-
-	pool_stat = function(self)
-		return self.curl:pool_stat()
 	end,
 
 	--

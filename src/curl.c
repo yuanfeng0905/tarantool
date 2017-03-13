@@ -28,8 +28,8 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include <assert.h>
 
+#include <assert.h>
 #include "fiber.h"
 #include "curl.h"
 #include "lua/utils.h"
@@ -39,10 +39,21 @@
 /** request and request pool API (Internal)
  * {{{
  */
-
+static inline
+int
+curl_request_add_header(struct curl_request *c, const char *http_header)
+{
+	assert(c);
+	assert(http_header);
+	struct curl_slist *l = curl_slist_append(c->headers, http_header);
+	if (l == NULL)
+		return -1;
+	c->headers = l;
+	return 0;
+}
 
 static inline
-bool
+int
 curl_request_add_header_keepalive(struct curl_request *req)
 {
 	static char buf[255];
@@ -52,22 +63,18 @@ curl_request_add_header_keepalive(struct curl_request *req)
 	snprintf(buf, sizeof(buf) - 1, "Keep-Alive: timeout=%d",
 			 (int) req->keepalive_idle);
 
-	if (!curl_request_add_header(req, buf))
-		return -1;
-	return 0;
+	return curl_request_add_header(req, buf);
 }
 
 static inline
 int
-curl_request_add_header_CL(struct curl_request *req)
+curl_request_add_header_content_length(struct curl_request *req)
 {
 	assert(req);
 	char buf[20];
 	snprintf(buf, sizeof(buf) - 1, "%s: %zu", "Content-Length", req->read);
 
-	if (!curl_request_add_header(req, buf))
-		return -1;
-	return 0;
+	return curl_request_add_header(req, buf);
 }
 
 static inline
@@ -76,9 +83,7 @@ curl_request_add_header_accept(struct curl_request *req)
 {
 	assert(req);
 	assert(req->easy);
-	if (!curl_request_add_header(req, "Accept: */*"))
-		return -1;
-	return 0;
+	return curl_request_add_header(req, "Accept: */*");
 }
 
 static
@@ -93,18 +98,23 @@ curl_request_start(struct curl_request *req);
  */
 
 struct curl_sock {
+	/* Curl easy handler */
 	CURL *easy;
+	/* Reference to contextt*/
 	struct curl_ctx *curl_ctx;
+	/* libev watcher */
 	struct ev_io ev;
 
+	/* Descriptor to curl_socket */
 	curl_socket_t sockfd;
 
+	/* Action came from socket*/
 	int action;
+	/* Timeout for watcher */
 	long timeout;
+	/* Flag on socket callbacks */
 	int evset;
 };
-
-
 
 
 /* }}}
@@ -114,11 +124,11 @@ struct curl_sock {
 static void curl_timer_cb(EV_P_ struct ev_timer *w, int revents);
 
 static inline
-bool
+int
 is_mcode_good(CURLMcode code)
 {
 	if (code == CURLM_OK)
-		return true;
+		return 0;
 
 	const char *s;
 
@@ -147,14 +157,12 @@ is_mcode_good(CURLMcode code)
 	case CURLM_BAD_SOCKET:
 		s = "CURLM_BAD_SOCKET";
 		/* ignore this error */
-		return true;
+		return 0;
 	}
 
-	say_info("ERROR: returns = %s", s);
-	if (code == CURLM_BAD_SOCKET)
-		return true;
+	say_debug("ERROR: returns = %s", s);
 
-	return false;
+	return -1;
 }
 
 
@@ -205,7 +213,7 @@ curl_check_multi_info(struct curl_ctx *l)
 		curl_easy_getinfo(easy, CURLINFO_EFFECTIVE_URL, &eff_url);
 		curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &http_code);
 
-		say_info("DONE: url = %s, curl_code = %d, http_code = %d",
+		say_debug("DONE: url = %s, curl_code = %d, http_code = %d",
 				eff_url, curl_code, (int) http_code);
 
 		if (curl_code != CURLE_OK)
@@ -239,13 +247,13 @@ curl_event_cb(EV_P_ struct ev_io *w, int revents)
 	CURLMcode rc = curl_multi_socket_action(l->multi, w->fd,
 						action, &l->still_running);
 
-	if (!is_mcode_good(rc))
+	if (is_mcode_good(rc) < 0)
 		++l->stat.failed_requests;
 
 	curl_check_multi_info(l);
 
 	if (l->still_running <= 0) {
-		say_info("last transfer done, kill timeout");
+		say_debug("last transfer done, kill timeout");
 		ev_timer_stop(l->loop, &l->timer_event);
 	}
 }
@@ -258,12 +266,12 @@ curl_timer_cb(EV_P_ struct ev_timer *w, int revents __attribute__((unused)))
 {
 	(void) loop;
 
-	say_info("timer_cb: w = %p, revents = %i", (void *) w, revents);
+	say_debug("timer_cb: w = %p, revents = %i", (void *) w, revents);
 
 	struct curl_ctx *l = (struct curl_ctx *) w->data;
 	CURLMcode rc = curl_multi_socket_action(l->multi,
 			CURL_SOCKET_TIMEOUT, 0, &l->still_running);
-	if (!is_mcode_good(rc))
+	if (is_mcode_good(rc) < 0)
 		++l->stat.failed_requests;
 
 	curl_check_multi_info(l);
@@ -275,7 +283,7 @@ static inline
 void
 curl_remove_sock(struct curl_sock *f, struct curl_ctx *l)
 {
-	say_info("removing socket");
+	say_debug("removing socket");
 
 	if (f == NULL)
 		return;
@@ -299,7 +307,7 @@ curl_set_sock(struct curl_sock *f,
 		int act,
 		struct curl_ctx *l)
 {
-	say_info("set new socket");
+	say_debug("set new socket");
 
 	const int kind = ( (act & CURL_POLL_IN ? EV_READ : 0) |
 					(act & CURL_POLL_OUT ? EV_WRITE : 0) );
@@ -330,7 +338,6 @@ curl_add_sock(curl_socket_t s, CURL *easy, int action, struct curl_ctx *l)
 
 	memset(fdp, 0, sizeof(struct curl_sock));
 
-
 	fdp->curl_ctx = l;
 
 	curl_set_sock(fdp, s, easy, action, l);
@@ -342,8 +349,7 @@ curl_add_sock(curl_socket_t s, CURL *easy, int action, struct curl_ctx *l)
 	return 0;
 }
 
-
-/* CURLMOPT_SOCKETFUNCTION */
+/* Called on socket action */
 static int
 curl_sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 {
@@ -353,7 +359,7 @@ curl_sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 	static const char *whatstr[] = {
 		"none", "IN", "OUT", "INOUT", "REMOVE" };
 
-	say_info("e = %p, s = %i, what = %s, cbp = %p, sockp = %p",
+	say_debug("e = %p, s = %i, what = %s, cbp = %p, sockp = %p",
 			e, s, whatstr[what], cbp, sockp);
 
 	if (what == CURL_POLL_REMOVE)
@@ -364,7 +370,7 @@ curl_sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 				return 1;
 			}
 		else {
-			say_info("Changing action from = %s, to = %s",
+			say_debug("Changing action from = %s, to = %s",
 					whatstr[fdp->action], whatstr[what]);
 			curl_set_sock(fdp, s, e, what, l);
 		}
@@ -373,13 +379,11 @@ curl_sock_cb(CURL *e, curl_socket_t s, int what, void *cbp, void *sockp)
 	return 0;
 }
 
-
-/** CURLOPT_WRITEFUNCTION / CURLOPT_READFUNCTION
- */
+/* Called on read action. Sents body to server */
 static size_t
 curl_read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 {
-	say_info("size = %zu, nmemb = %zu", size, nmemb);
+	say_debug("size = %zu, nmemb = %zu", size, nmemb);
 
 	struct curl_request *req = (struct curl_request *) ctx;
 	const size_t total_size = size * nmemb;
@@ -395,6 +399,8 @@ curl_read_cb(void *ptr, size_t size, size_t nmemb, void *ctx)
 	return to_send;
 }
 
+/* Internal function. Push piece of data to ibuf.
+ * Used in write_cb and headers_cb */
 static size_t
 curl_push_buffer(struct ibuf *bufp, char *data, size_t size)
 {
@@ -410,10 +416,12 @@ curl_push_buffer(struct ibuf *bufp, char *data, size_t size)
 	return size;
 }
 
+/* Called on write action.
+ * Recieves data from server and writes it to buffer */
 static size_t
 curl_write_cb(char *ptr, size_t size, size_t nmemb, void *ctx)
 {
-	say_info("size = %zu, nmemb = %zu", size, nmemb);
+	say_debug("size = %zu, nmemb = %zu", size, nmemb);
 
 	struct curl_request *req = (struct curl_request *) ctx;
 	const size_t bytes = size * nmemb;
@@ -421,16 +429,18 @@ curl_write_cb(char *ptr, size_t size, size_t nmemb, void *ctx)
 	return curl_push_buffer(&req->response.body_buf, ptr, bytes);
 }
 
-
+/* Called on recieving headers action.
+ * Recieves parsed headers from server and writes them to buffer */
 static size_t
 curl_header_cb(char *buffer, size_t size, size_t nitems, void *ctx)
 {
-	say_info("size = %zu, mitems = %zu", size, nitems);
+	say_debug("size = %zu, mitems = %zu", size, nitems);
 	struct curl_request *req = (struct curl_request *) ctx;
 	const size_t bytes = size * nitems;
 	return curl_push_buffer(&req->response.headers_buf, buffer, bytes);
 }
 
+/* Initiates the request */
 static CURLMcode
 curl_request_start(struct curl_request *req)
 {
@@ -459,7 +469,7 @@ curl_request_start(struct curl_request *req)
 			return CURLM_OUT_OF_MEMORY;
 		}
 	} else {
-		if (!curl_request_add_header(req, "Connection: close")) {
+		if (curl_request_add_header(req, "Connection: close") < 0) {
 			++req->ctx->stat.failed_requests;
 			return CURLM_OUT_OF_MEMORY;
 		}
@@ -515,14 +525,14 @@ curl_request_start(struct curl_request *req)
 	++req->ctx->stat.total_requests;
 
 	CURLMcode rc = curl_multi_add_handle(req->ctx->multi, req->easy);
-	if (!is_mcode_good(rc)) {
+	if (is_mcode_good(rc) < 0) {
 		++req->ctx->stat.failed_requests;
 		return rc;
 	}
 	return rc;
 }
 
-
+/* Takes response from request object */
 static struct curl_response*
 curl_get_response(struct curl_request *req)
 {
@@ -589,7 +599,7 @@ curl_ctx_create(struct curl_ctx *ctx, bool pipeline, long max_conns)
 		goto error_exit;
 
 	ctx->multi = curl_multi_init();
-	if (ctx->multi == NULL){
+	if (ctx->multi == NULL) {
 		diag_set(SystemError, "failed to init multi handler");
 		goto error_exit;
 	}
@@ -647,7 +657,7 @@ curl_request_execute(struct curl_request *req)
 
 	req->ctx->done = false;
 
-	if (curl_request_add_header_CL(req) < 0) {
+	if (curl_request_add_header_content_length(req) < 0) {
 		reason = "can't allocate memory (curl_request_add_header)";
 		goto error_exit;
 	}
@@ -726,7 +736,7 @@ curl_set_headers(struct curl_request *req, struct curl_header *hh)
 	for (;hh->key; hh++) {
 		snprintf(tmp, sizeof(tmp) - 1, "%s: %s",
 				hh->key, hh->value);
-		if (!curl_request_add_header(req, tmp)) {
+		if (curl_request_add_header(req, tmp) < 0) {
 			return -1;
 		}
 	}

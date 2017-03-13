@@ -144,7 +144,6 @@ luaT_curl_request(lua_State *L)
 		lua_pop(L, 1);
 
 
-		/* SSL/TLS cert  {{{ */
 		lua_pushstring(L, "ca_path");
 		lua_gettable(L, 4);
 		if (!lua_isnil(L, top + 1))
@@ -158,7 +157,6 @@ luaT_curl_request(lua_State *L)
 			curl_set_ca_file(req,
 					lua_tostring(L, top + 1));
 		lua_pop(L, 1);
-		/* }}} */
 
 		lua_pushstring(L, "max_conns");
 		lua_gettable(L, 4);
@@ -239,10 +237,10 @@ luaT_curl_request(lua_State *L)
 		goto error_exit;
 	}
 
-	int res = curl_make_result(L, resp);
+	int result = curl_make_result(L, resp);
 	curl_request_delete(req);
 	curl_response_destroy(ctx, resp);
-	return	res;
+	return	result;
 
 error_exit:
 	if (req)
