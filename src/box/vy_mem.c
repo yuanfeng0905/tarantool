@@ -89,6 +89,8 @@ vy_mem_new(struct key_def *key_def, struct lsregion *allocator,
 			   vy_mem_tree_extent_free, index);
 	rlist_create(&index->in_frozen);
 	rlist_create(&index->in_dirty);
+	index->pin_count = 0;
+	ipc_cond_create(&index->pin_cond);
 	return index;
 }
 
@@ -115,6 +117,7 @@ vy_mem_delete(struct vy_mem *index)
 	tuple_format_ref(index->format, -1);
 	tuple_format_ref(index->format_with_colmask, -1);
 	tuple_format_ref(index->upsert_format, -1);
+	ipc_cond_destroy(&index->pin_cond);
 	TRASH(index);
 	free(index);
 }
