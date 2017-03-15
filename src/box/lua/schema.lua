@@ -891,6 +891,11 @@ function box.schema.space.bless(space)
     index_mt.delete = function(index, key)
         return internal.delete(index.space_id, index.id, keify(key));
     end
+
+    index_mt.info = function(index)
+        return internal.info(index.space_id, index.id);
+    end
+
     index_mt.drop = function(index)
         return box.schema.index.drop(index.space_id, index.id)
     end

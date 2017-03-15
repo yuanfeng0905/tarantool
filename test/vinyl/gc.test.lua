@@ -11,7 +11,7 @@ _ = s:create_index('pk', index_options)
 path = index_options.path
 if not path then path = fio.pathjoin(box.cfg.vinyl_dir, tostring(s.id), tostring(s.index.pk.id)) end
 
-function run_count() return box.info.vinyl().db[s.id..'/'..s.index.pk.id].run_count end
+function run_count() return s.index.pk:info().run_count end
 function file_count() return #fio.glob(fio.pathjoin(path, '*')) end
 function snapshot() box.snapshot() box.internal.gc(box.info.cluster.signature) end
 
