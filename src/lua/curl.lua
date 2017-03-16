@@ -62,158 +62,123 @@ end
 
 
 --
---	<sync_request> This function does HTTP request
+--	<request> This function does HTTP request
 --
 --	Parameters:
 --
 --	method	- HTTP method, like GET, POST, PUT and so on
 --	url		- HTTP url, like https://tarantool.org/doc
---	body	- this parameter is optional, you may use it for passing the
---				body to a server. Like 'My text string!'
 --	options - this is a table of options.
+--		body	- this parameter is optional, you may use it for passing
+--		 data to a server. Like 'My text string!'
 --
---				ca_path - a path to ssl certificate dir;
+--		ca_path - a path to ssl certificate dir;
 --
---				ca_file - a path to ssl certificate file;
+--		ca_file - a path to ssl certificate file;
 --
---				headers - a table of HTTP headers;
+--		headers - a table of HTTP headers;
 --
---				max_conns -
---				max amount of cached alive connections;
+--		max_conns - max amount of cached alive connections;
 --
---				keepalive_idle & keepalive_interval -
---				 non-universal keepalive knobs
---				 (Linux, AIX, HP-UX, more);
---				low_speed_time & low_speed_limit -
---					If the download receives less than
---					"low speed limit" bytes/second
---					during "low speed time" seconds,
---					the operations is aborted.
---					You could i.e if you have
---					a pretty high speed connection, abort if
---					it is less than 2000 bytes/sec
---					during 20 seconds;
+--		keepalive_idle & keepalive_interval -
+--			non-universal keepalive knobs (Linux, AIX, HP-UX, more);
 --
---				read_timeout- Time-out the read operation
---					after this amount of seconds;
+--		low_speed_time & low_speed_limit -
+--			If the download receives less than
+--			"low speed limit" bytes/second
+--			during "low speed time" seconds,
+--			the operations is aborted.
+--			You could i.e if you have
+--			a pretty high speed connection, abort if
+--			it is less than 2000 bytes/sec
+--			during 20 seconds;
 --
---				connect_timeout - Time-out connect operations
---					after this amount of seconds,
---					if connects are OK within this time,
---					then fine...
---					This only aborts the connect phase;
+--		read_timeout - Time-out the read operation
+--			after this amount of seconds;
 --
---				dns_cache_timeout - DNS cache timeout;
+--		connect_timeout - Time-out connect operations
+--			after this amount of seconds,
+--			if connects are OK within this time,
+--			then fine...
+--			This only aborts the connect phase;
+--
+--		dns_cache_timeout - DNS cache timeout;
 --
 --	Returns:
---				{code=NUMBER, body=STRING} or error()
+--			{http_code=NUMBER,
+--			body=STRING,
+--			headers=STRING,
+--			errmsg=STRING} or error()
 --
-local function sync_request(self, method, url, body, opts)
-
-	if not method or not url then
-		error('sync_request(method, url [, body [, options]])')
-	end
-
-	opts = opts or {}
-
-
-	local response = self.curl:luaT_curl_request(method, url,
-		{ca_path			= opts.ca_path,
-		ca_file			= opts.ca_file,
-		headers			= opts.headers,
-		body				= body or '',
-		max_conns			= opts.max_conns,
-		keepalive_idle		= opts.keepalive_idle,
-		keepalive_interval = opts.keepalive_interval,
-		low_speed_time		= opts.low_speed_time,
-		low_speed_limit	= opts.low_speed_limit,
-		read_timeout		= opts.read_timeout,
-		connect_timeout	= opts.connect_timeout,
-		dns_cache_timeout	= opts.dns_cache_timeout,
-		curl_verbose		= opts.curl_verbose, } )
-
-	-- Curl has an internal error
-	if response.curl_code ~= 0 then
-		error("curl has an internal error,code = " ..
-			response.curl_code ..
-			" msg = " .. response.error_message)
-	end
-
-	-- Curl did a request and it has a response
-	return {
-		code = response.http_code,
-		body = response.body,
-		headers = response.headers
-	}
-end
--- }}}
 
 
 curl_mt = {
 	__index = {
 	--
-	--	<request> see <sync_request>
+	--	<request> see above <request>
 	--
-	request = function(self, method, url, body, options)
+	request = function(self, method, url, opts)
+
 		if not method or not url then
-			error('signature (method, url [, body [, options]])')
+			error('request(method, url [, options]])')
 		end
-		return sync_request(self, method, url, body, options)
+
+		return self.curl:request(method, url, opts or {})
 	end,
 
 	--
-	-- <get> - see <sync_request>
+	-- <get> - see <request>
 	--
 	get = function(self, url, options)
-		return self:request('GET', url, '', options)
+		return self:request('GET', url, options)
 	end,
 
 	--
-	-- <post> - see <sync_request>
+	-- <post> - see <request>
 	--
-	post = function(self, url, body, options)
-		return self:request('POST', url, body, options)
+	post = function(self, url, options)
+		return self:request('POST', url, options)
 	end,
 
 	--
-	-- <put> - see <sync_request>
+	-- <put> - see <request>
 	--
-	put = function(self, url, body, options)
-		return self:request('PUT', url, body, options)
+	put = function(self, url, options)
+		return self:request('PUT', url, options)
 	end,
 
 	--
-	-- <http_options> see <sync_request>
+	-- <http_options> see <request>
 	--
 	http_options = function(self, url, options)
-		return self:request('OPTIONS', url, '', options)
+		return self:request('OPTIONS', url, options)
 	end,
 
 	--
-	-- <head> see <sync_request>
+	-- <head> see <request>
 	--
 	head = function(self, url, options)
-		return self:request('HEAD', url, '', options)
+		return self:request('HEAD', url, options)
 	end,
 	--
-	-- <delete> see <sync_request>
+	-- <delete> see <request>
 	--
 	delete = function(self, url, options)
-		return self:request('DELETE', url, '', options)
+		return self:request('DELETE', url, options)
 	end,
 
 	--
-	-- <trace> see <sync_request>
+	-- <trace> see <request>
 	--
-	trace = function(self, url, options)
-		return self:request('TRACE', url, '', options)
+	http_trace = function(self, url, options)
+		return self:request('TRACE', url, options)
 	end,
 
 	--
-	-- <http_connect> see <sync_request>
+	-- <http_connect> see <request>
 	--
 	http_connect = function(self, url, options)
-		return self:request('CONNECT', url, '', options)
+		return self:request('CONNECT', url, options)
 	end,
 
 	--
@@ -250,15 +215,6 @@ curl_mt = {
 		return self.curl:stat()
 	end,
 
-	--
-	-- <free> - cleanup resources
-	--
-	-- Should be called at the end of work.
-	-- This function does clean all resources (i.e. destructor).
-	--
-	free = function(self)
-		self.curl:free()
-	end,
 	},
 }
 

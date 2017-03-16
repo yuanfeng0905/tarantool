@@ -31,7 +31,6 @@
  * SUCH DAMAGE.
  */
 
-
 #include <diag.h>
 #include "curl/curl.h"
 #include "small/ibuf.h"
@@ -42,26 +41,7 @@
  * Structures {{{
 */
 
-
-/* Context of curl */
-struct curl_ctx {
-
-	/* Libev loop and timer-watcher*/
-	struct ev_loop	*loop;
-	struct ev_timer timer_event;
-
-	/* Curl multi handler*/
-	CURLM	*multi;
-	/* State of request; Internal use */
-	int 	still_running;
-
-	/* Memory pools for requests and responses */
-	struct mempool req_pool;
-	struct mempool resp_pool;
-
-	/* Various values of statistics, they are used only for all
-	 * Connection in curl context */
-	struct {
+struct curl_stat {
 	uint64_t total_requests;
 	uint64_t http_200_responses;
 	uint64_t http_other_responses;
@@ -69,21 +49,24 @@ struct curl_ctx {
 	size_t	 active_requests;
 	size_t	 sockets_added;
 	size_t	 sockets_deleted;
-	} stat;
-
-	bool done;
 };
 
-/*
- * Structure header need to be filled before sending.
- * Two strings without delimeter.
- */
-struct curl_header {
-	/* Name of header */
-	const char *key;
+/* Context of curl */
+struct curl_ctx {
 
-	/* Value of header */
-	const char *value;
+	/* Libev timer-watcher*/
+	struct ev_timer timer_event;
+
+	/* Curl multi handler*/
+	CURLM	*multi;
+
+	/* Memory pools for requests and responses */
+	struct mempool req_pool;
+	struct mempool resp_pool;
+
+	/* Various values of statistics, they are used only for all
+	 * Connection in curl context */
+	struct curl_stat stat;
 };
 
 struct curl_request {
@@ -96,91 +79,30 @@ struct curl_request {
 
 	/* HTTP headers */
 	struct curl_slist *headers;
-	
-	/*
-	 * Response attributes
-	 * {{{
-	 */
-	/* Buffers for headers and body */
-	struct ibuf headers_buf;
-	struct ibuf body_buf;
 
-	/* codes of response */
-	int curl_code;
-	int http_code;
-
-	/* error message */
-	const char *errmsg;
-	/*}}}
-	 */
-
-	/* body to send to server, its length, number of bytes sent to server */
-	const char *body;
+	/* body to be sent to server,
+	 * its length, number of bytes sent to server */
+	char *body;
 	size_t read;
 	size_t sent;
-
-	/* condition varaible for internal conditional loop */
-	struct ipc_cond cond;
-	/*url to send request to */
-	const char *url;
-
-	/* HTTP method */
-	const char *method;
-
-	/* Max amount of cached alive Connections */
-	long max_conns;
-
-	/* Non-universal keepalive knobs (Linux, AIX, HP-UX, more) */
-	long keepalive_idle;
-	long keepalive_interval;
-
-	/* Set the "low speed limit & time"
-	 If the download receives less than "low speed limit" bytes/second
-	 during "low speed time" seconds, the operations is aborted.
-	 You could i.e if you have a pretty high speed Connection,
-	 abort if it is less than 2000 bytes/sec during 20 seconds;
-	 */
-
-	long low_speed_time;
-	long low_speed_limit;
-
-	/* Time-out the read operation after this amount of seconds */
-	long read_timeout;
-
-	/* Time-out connects operations after this amount of seconds,
-	 * if connects are OK within this time, then fine...
-	 * This only aborts the Connect phase.
-	 */
-	long connect_timeout;
-
-	/* DNS cache timeout */
-	long dns_cache_timeout;
-
-	/* Enable/Disable curl verbose mode */
-	bool curl_verbose;
-
-	/* Path to directory holding one or more certificates
-	 * to verify the peer with */
-	const char *ca_path;
-
-	/* File holding one or more certificates
-	 * to verify the peer with */
-	const char *ca_file;
-
 };
 
 /* Response structure. User gets it after executing request */
 struct curl_response {
+	/* Reference to curl context */
+	struct curl_ctx* ctx;
 	/* Internal curl code */
 	int curl_code;
 	/* Http code */
 	int http_code;
 	/* Reference to string headers */
-	char *headers;
+	struct ibuf headers;
 	/* Reference to string body */
-	char *body;
-	/* Reference to error messsage */
+	struct ibuf body;
+	/* Error message */
 	const char *errmsg;
+	/* Internal condition variable */
+	struct ipc_cond cond;
 };
 
 /*
@@ -221,151 +143,255 @@ curl_ctx_destroy(struct curl_ctx *);
 /**
  * \brief Creates object of request
  * \param ctx - reference to context
- * \param size_buf - initial size of buffers on response
- * \return new request object
+ * \return new request object or NULL in case of error
  */
 struct curl_request*
-curl_request_new(struct curl_ctx *ctx, size_t size_buf);
+curl_request_new(struct curl_ctx *ctx);
 
 /**
- *\brief This function does async HTTP request
- *\param request - reference to request object with filled fields
- *\return pointer structure curl_response
- *\details User recieves the reference to object response,
+ * \brief This function does async HTTP request
+ * \param request - reference to request object with filled fields
+ * \return pointer structure curl_response or
+ * \details User recieves the reference to object response,
  * which should be destroyed with curl_response_destroy() at the end
  * Don't delete the request object before handling response!
  * That will destroy some fields in response object.
  */
 struct curl_response*
-curl_request_execute(struct curl_request *);
+curl_request_execute(struct curl_request *, const char *method,
+		const char *url);
 
 /**
  * \brief Delete request object
  * \param request - reference to object
+ * \details Should be called even if error in execute appeared
  */
 void
 curl_request_delete(struct curl_request *req);
+
+/**
+ * Setter field headers.
+ * \param req - object request
+ * \param key - name of header
+ * \param value - value of header
+ */
+int
+curl_set_headers(struct curl_request *req, const char *key, const char *value);
+
+/**
+ * Sets body of request
+ * \param req - reference to curl_request
+ * \param body
+ * \param bytes - number of bytes to be sent
+ */
+static inline int
+curl_set_body(struct curl_request *req, const char *body, size_t bytes)
+{
+	assert(req);
+	assert(body);
+	say_debug("body:%s, bytes:%zu", body, bytes);
+	if (bytes > 0) {
+		req->body = (char *) malloc(bytes);
+		if (!req->body) {
+			diag_set(OutOfMemory, bytes, "malloc", "curl");
+			return -1;
+		}
+		memcpy(req->body, body, bytes);
+		req->read = bytes;
+		req->sent = 0;
+	}
+	return 0;
+}
+
+/** Sets Max amount of cached alive Connections
+ * \param req
+ * \param max_conns
+ * */
+static inline void
+curl_set_max_conns(struct curl_request *req, long max_conns)
+{
+	assert(req);
+	assert(req->easy);
+	if (max_conns > 0)
+		curl_easy_setopt(req->easy, CURLOPT_MAXCONNECTS, max_conns);
+}
+
+
+/**
+ * \brief Non-universal keepalive knobs (Linux, AIX, HP-UX, more)
+ * \param req - reference to request
+ * \param idle - delay, in seconds, that the operating system will wait
+ * 		while the connection is idle before sending keepalive probes
+ * \param interval - Sets the interval, in seconds,
+ * 			that the operating system will wait
+ * 			between sending keepalive probes
+ * \details Depends on version of libcurl. Added in 7.25.0
+ */
+int
+curl_set_keepalive(struct curl_request *req, long idle, long interval);
+
+/**
+ * \brief Set the "low speed time"
+ * \param req
+ * \param low_speed_time
+ * \details If the download receives less than "low speed limit" bytes/second
+ * during "low speed time" seconds, the operations is aborted.
+ * You could i.e if you have a pretty high speed Connection,
+ * abort if it is less than 2000 bytes/sec during 20 seconds;
+*/
+static inline void
+curl_set_low_speed_time(struct curl_request *req, long low_speed_time)
+{
+	assert(req->easy);
+	if (low_speed_time > 0)
+		curl_easy_setopt(req->easy, CURLOPT_LOW_SPEED_TIME,
+							low_speed_time);
+}
+
+/**
+ * \brief Set the "low speed limit"
+ * \param req
+ * \param low_speed_limit
+ * \details If the download receives less than "low speed limit" bytes/second
+ * during "low speed time" seconds, the operations is aborted.
+ * You could i.e if you have a pretty high speed Connection,
+ * abort if it is less than 2000 bytes/sec during 20 seconds;
+ */
+static inline void
+curl_set_low_speed_limit(struct curl_request *req, long low_speed_limit)
+{
+	assert(req);
+	assert(req->easy);
+	if (low_speed_limit > 0)
+		curl_easy_setopt(req->easy, CURLOPT_LOW_SPEED_LIMIT,
+				low_speed_limit);
+}
+
+/* \brief Set Time-out the read operation after this amount of seconds
+ * \param req
+ * \param read_timeout
+ */
+static inline void
+curl_set_read_timeout(struct curl_request *req, long read_timeout)
+{
+	assert(req);
+	assert(req->easy);
+	if (read_timeout > 0)
+		curl_easy_setopt(req->easy, CURLOPT_TIMEOUT, read_timeout);
+}
+
+/*
+ * \brief Sets connect timout
+ * \param req
+ * \req connect_timeout
+ * \details Time-out connects operations after this amount of seconds,
+ * if connects are OK within this time, then fine...
+ * This only aborts the Connect phase.
+ */
+static inline void
+curl_set_connect_timeout(struct curl_request *req, long connect_timeout)
+{
+	assert(req);
+	assert(req->easy);
+	if (connect_timeout > 0)
+		curl_easy_setopt(req->easy, CURLOPT_CONNECTTIMEOUT,
+				connect_timeout);
+}
+
+/* \brief Sets DNS cache timeout
+ * \param req
+ * \param dns_cache_timeout
+ */
+static inline void
+curl_set_dns_cache_timeout(struct curl_request *req, long dns_cache_timeout)
+{
+	assert(req);
+	assert(req->easy);
+	if (dns_cache_timeout > 0)
+		curl_easy_setopt(req->easy, CURLOPT_DNS_CACHE_TIMEOUT,
+						 dns_cache_timeout);
+}
+
+/* \brief Enables/Disables curl verbose mode
+ * \param req
+ * \param curl_verbose - flag
+ */
+static inline void
+curl_set_verbose(struct curl_request *req, bool curl_verbose)
+{
+	assert(req);
+	assert(req->easy);
+	if (curl_verbose)
+		curl_easy_setopt(req->easy, CURLOPT_VERBOSE, 1L);
+}
+
+/* \brief Sets directory with certificates
+ * \param req
+ * \ca_path - Path to directory holding one or more certificates
+ * to verify the peer with
+ */
+static inline void
+curl_set_ca_path(struct curl_request *req, const char *ca_path)
+{
+	assert(req);
+	assert(req->easy);
+	if (ca_path)
+		curl_easy_setopt(req->easy, CURLOPT_CAPATH, ca_path);
+}
+
+/* \brief Sets name of file with certificates
+ * \param req
+ * \param ca_file - File holding one or more certificates
+ * to verify the peer with
+ */
+static inline void
+curl_set_ca_file(struct curl_request *req, const char *ca_file)
+{
+	assert(req);
+	assert(req->easy);
+	if (ca_file)
+		curl_easy_setopt(req->easy, CURLOPT_CAINFO, ca_file);
+}
+
+/*
+ * }}} Request API
+ */
+
+/*
+ * Response API
+ * {{{
+ */
+
 /**
  * \brief Destroy the response object
  * \param ctx - reference to context
  * \param resp - reference to response object
  */
-static inline void
-curl_response_destroy(struct curl_ctx *ctx ,struct curl_response *resp) {
-	mempool_free(&ctx->resp_pool, resp);
-}
+void
+curl_response_delete(struct curl_response *resp);
 
-/**
- * Setter field method.
- * \param req - object request
- * \param method - HTTP method, like GET, POST, PUT and so on
+/* \brief Get response buffers
+ * \param resp - response
+ * \details Buffers will be destroyed after call reponse_destroy
  */
-static inline void
-curl_set_method(struct curl_request *req, const char *method)
-{
-	req->method = method;
+static inline char *
+curl_response_headers(struct curl_response* resp) {
+	if (ibuf_used(&resp->headers) > 0) {
+		return resp->headers.buf;
+	}
+	return NULL;
 }
 
-/**
- * Setter field url.
- * \param req - object request
- * \param url - HTTP url, like https://tarantool.org/doc
- * */
-static inline void
-curl_set_url(struct curl_request *req, const char *url)
-{
-	req->url = url;
-}
-
-/**
- * Setter field headers.
- * \param req - object request
- * \param headers - pointer to array of struct header
- *  headers should be filled in advance
+/* \brief Get response body
+ * \param resp - response
+ * \details Body will be destroyed after call reponse_destroy
  */
-int
-curl_set_headers(struct curl_request *, struct curl_header *);
-
-/* Other fields setters */
-
-static inline void
-curl_set_body(struct curl_request *req, const char *body)
-{
-	assert(body);
-	req->body = body;
-	req->read = strlen(body);
-	req->sent = 0;
+static inline char *
+curl_response_body(struct curl_response* resp) {
+	if (ibuf_used(&resp->body) > 0) {
+		return resp->body.buf;
+	}
+	return NULL;
 }
-
-static inline void
-curl_set_max_conns(struct curl_request *req, long max_conns)
-{
-	req->max_conns = max_conns;
-}
-
-static inline void
-curl_set_keepalive_idle(struct curl_request *req, long keepalive_idle)
-{
-	req->keepalive_idle = keepalive_idle;
-}
-
-static inline void
-curl_set_keepalive_interval(struct curl_request *req, long keepalive_interval)
-{
-	req->keepalive_interval = keepalive_interval;
-}
-
-static inline void
-curl_set_low_speed_time(struct curl_request *req, long low_speed_time)
-{
-	req->low_speed_time = low_speed_time;
-}
-
-static inline void
-curl_set_low_speed_limit(struct curl_request *req, long low_speed_limit)
-{
-	req->low_speed_limit = low_speed_limit;
-}
-
-static inline void
-curl_set_read_timeout(struct curl_request *req, long read_timeout)
-{
-	req->read_timeout = read_timeout;
-}
-
-static inline void
-curl_set_connect_timeout(struct curl_request *req, long connect_timeout)
-{
-	req->connect_timeout = connect_timeout;
-}
-
-static inline void
-curl_set_dns_cache_timeout(struct curl_request *req, long dns_cache_timeout)
-{
-	req->dns_cache_timeout = dns_cache_timeout;
-}
-
-static inline void
-curl_set_verbose(struct curl_request *req, bool curl_verbose)
-{
-	req->curl_verbose = curl_verbose;
-}
-
-static inline void
-curl_set_ca_path(struct curl_request *req, const char *ca_path)
-{
-	req->ca_path = ca_path;
-}
-
-static inline void
-curl_set_ca_file(struct curl_request *req, const char *ca_file)
-{
-	req->ca_file = ca_file;
-}
-
-
-/*
- * }}} Request API
- */
 
 #endif /* DRIVER_H_INCLUDED */

@@ -12,11 +12,11 @@ log.level(4)
 box.cfg{logger='tarantool.log'}
 
 
-test:plan(3)
+test:plan(4)
 test:test("basic http post/get", function(test)
 	test:plan(11)
 
-	local http = curl.http({pool_size=1})
+	local http = curl.http()
 
 	test:ok(http ~= nil, "client is created")
 	local url = "http://httpbin.org/"
@@ -25,35 +25,38 @@ test:test("basic http post/get", function(test)
 	local json_body = json.encode(my_body)
 
 	local r = http:get(url .. "get", {headers = headers})
-	test:is(r.code, 200, "GET: http code page exists")
+	test:is(r.http_code, 200, "GET: http code page exists")
 	test:isnt(r.body:len(), 0,"GET: not empty body page exists")
 	local body = json.decode(r.body)
 	test:is(body.url, url .. "get", "GET: right body")
 
 	r = http:get(url .. 'this/page/not/exists',
 					   {headers = headers})
-	test:is(r.code, 404, "GET: http_code page not exists")
+	test:is(r.http_code, 404, "GET: http_code page not exists")
 	test:isnt(r.body:len(), 0, "GET: not empty body page not exists")
-	test:ok(string.find(r.body, "Not Found"), "GET: right body page not exists")
+	test:ok(string.find(r.body, "Not Found"),
+					"GET: right body page not exists")
 
-	local r = http:post('http://httpbin.org/post', json_body,
+	local r = http:post('http://httpbin.org/post',
 						{headers = headers,
+						 body = json_body,
 						 keepalive_idle = 30,
 						 keepalive_interval = 60,})
 
 	body = json.decode(r.body)
-	test:ok( r.code == 200 and
+	test:ok( r.http_code == 200 and
 			body.headers['My-Header'] == headers.my_header and
 			body.headers['My-Header2'] == headers.my_header2,
 			"POST: headers")
 
-	local r = http:put('http://httpbin.org/put', json_body,
+	local r = http:put('http://httpbin.org/put',
 						{headers = headers,
+						 body = json_body,
 						 keepalive_idle = 30,
 						 keepalive_interval = 60,})
 
 	body = json.decode(r.body)
-	test:ok( r.code == 200 and
+	test:ok( r.http_code == 200 and
 			body.headers['My-Header'] == headers.my_header and
 			body.headers['My-Header2'] == headers.my_header2,
 			"PUT: headers")
@@ -61,38 +64,56 @@ test:test("basic http post/get", function(test)
 
 	local st = http:stat()
 	test:ok(st.sockets_added == st.sockets_deleted and
-			st.active_requests == 0 
+			st.active_requests == 0
 			, "stats checking")
 	-- issue https://github.com/tarantool/curl/issues/3
 	local data = {a = 'b'}
 	local headers = {}
 	headers['Content-Type'] = 'application/json'
-	r = http:post('https://httpbin.org/post', json.encode(data),
-						{headers=headers})
-	test:ok(r.code == 200 and json.decode(r.body)['json']['a'] == data['a'],
+	r = http:post('https://httpbin.org/post',
+						{headers = headers,
+						body = json.encode(data),})
+	test:ok(r.http_code == 200 and json.decode(r.body)['json']['a']
+								== data['a'],
 					"tarantool/curl/issues/3")
 
-	http:free()
+end)
+
+test:test("Errors checks", function(test)
+	test:plan(6)
+	local http = curl:http()
+	test:ok(not pcall(http.get, http, "htp://ya.ru"),
+		"GET: curl exception on bad protocol")
+	test:ok(not pcall(http.post, http, "htp://ya.ru", {body="{val=1}"}),
+		"POST: curl exception on bad protocol")
+	test:ok(not pcall(http.pos, http, "ya.ru"),
+		"POST: sent: curl error on empty body")
+	test:ok(not pcall(http.pos, http, "ya.ru"),
+		"PUT: sent: curl error on empty body")
+	test:ok(not pcall(http.get, http, "http://yaru"),
+		"GET: curl exception on bad url")
+	local status, err = pcall(http.request, http, "NOMETHOD", "ya.ru")
+	test:ok(not status and string.find(json.encode(err), "undefined method"),
+				"Exception on method, that doesn't exist")
 end)
 
 test:test("special methods", function(test)
 	test:plan(4)
-	local http = curl.http({pool_size=1})
+	local http = curl.http()
 	local url = "https://httpbin.org/"
 
 	local delete_data = http:delete(url .. "delete")
-	test:is(delete_data.code, 200, "HTTP:DELETE request")
+	test:is(delete_data.http_code, 200, "HTTP:DELETE request")
 
 	local options_data = http:http_options(url)
-	test:is(options_data.code, 200, "HTTP:OPTIONS request")
+	test:is(options_data.http_code, 200, "HTTP:OPTIONS request")
 
 
 	local head_data = http:head(url)
 	local some_header = "Server: nginx"
-	test:is(head_data.code, 200, "HTTP:HEAD request code")
+	test:is(head_data.http_code, 200, "HTTP:HEAD request code")
 	test:ok(string.find(head_data.headers, some_header),
 		"HTTP:HEAD request content")
-	http:free()
 end)
 
 
@@ -109,14 +130,12 @@ test:test("tests with server", function(test)
 
 	fiber.sleep(1)
 
-	local trace_data = http:trace(host)
-	test:is(trace_data.code, 200, "HTTP:TRACE request")
+	local trace_data = http:http_trace(host)
+	test:is(trace_data.http_code, 200, "HTTP:TRACE request")
 
 
 	local connect_data = http:http_connect(host)
-	test:is(connect_data.code, 200, "HTTP:CONNECT request")
-
-	http:free()
+	test:is(connect_data.http_code, 200, "HTTP:CONNECT request")
 
 
 	local num = 10
@@ -148,8 +167,9 @@ test:test("tests with server", function(test)
 
 	  for j = 1, 10 do
 		  fiber.create(function()
-			  obj.http:post(obj.url, obj.body,
+			  obj.http:post(obj.url,
 				{headers = obj.headers,
+				body = obj.body,
 				keepalive_idle = 30,
 				keepalive_interval = 60,
 				connect_timeout = obj.connect_timeout,
@@ -197,7 +217,6 @@ test:test("tests with server", function(test)
 				rest = 0
 			end
 
-			obj.http:free()
 			rest = rest - 1
 			curls[i].http = nil
 		  end

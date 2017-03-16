@@ -1,5 +1,5 @@
 TAP version 13
-1..3
+1..4
     # basic http post/get
     1..11
     ok - client is created
@@ -15,6 +15,16 @@ TAP version 13
     ok - tarantool/curl/issues/3
     # basic http post/get: end
 ok - basic http post/get
+    # Errors checks
+    1..6
+    ok - GET: curl exception on bad protocol
+    ok - POST: curl exception on bad protocol
+    ok - POST: sent: curl error on empty body
+    ok - PUT: sent: curl error on empty body
+    ok - GET: curl exception on bad url
+    ok - Exception on method, that doesn't exist
+    # Errors checks: end
+ok - Errors checks
     # special methods
     1..4
     ok - HTTP:DELETE request
