@@ -52,7 +52,7 @@ http.createServer(function (req, res) {
                             '\r\n');
                       srvSocket.write(head);
                       srvSocket.end()
-                      cltSocket.end()    
+                      cltSocket.end()
                       });
     }
     ).listen(10000);
