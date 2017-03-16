@@ -1554,40 +1554,45 @@ vy_range_remove_run(struct vy_range *range, struct vy_run *run)
 }
 
 /**
- * Allocate a new run for a range and write the information
- * about it to the metadata log so that we could still find
- * and delete it in case a write error occured. This function
- * is called from dump/compaction task constructor.
+ * Allocate a new run and write the information about it to the
+ * metadata log so that we could still find and delete it in case
+ * a write error occured.
  */
+static inline struct vy_run *
+vy_run_prepare_new(int64_t lsn)
+{
+	struct vy_run *run = vy_run_new(xctl_next_vy_run_id());
+	if (run == NULL)
+		return NULL;
+	xctl_tx_begin();
+	xctl_prepare_vy_run(lsn, run->id);
+	if (xctl_tx_commit() < 0) {
+		vy_run_delete(run);
+		return NULL;
+	}
+	return run;
+}
+
 static int
 vy_range_prepare_new_run(struct vy_range *range)
 {
 	struct vy_index *index = range->index;
-	struct vy_run *run = vy_run_new(xctl_next_vy_run_id());
+	struct vy_run *run = vy_run_prepare_new(index->key_def->opts.lsn);
 	if (run == NULL)
 		return -1;
-	xctl_tx_begin();
-	xctl_prepare_vy_run(index->key_def->opts.lsn, run->id);
-	if (xctl_tx_commit() < 0) {
-		vy_run_delete(run);
-		return -1;
-	}
 	range->new_run = run;
 	return 0;
 }
 
 /**
- * Free range->new_run and write a record to the metadata
- * log indicating that the run is not needed any more.
- * This function is called on dump/compaction task abort.
+ * Free run and write a record to the metadata log indicating that
+ * the run is not needed any more.
  */
 static void
-vy_range_discard_new_run(struct vy_range *range)
+vy_run_discard(struct vy_run *run)
 {
-	int64_t run_id = range->new_run->id;
-
-	vy_run_delete(range->new_run);
-	range->new_run = NULL;
+	int64_t run_id = run->id;
+	vy_run_delete(run);
 
 	ERROR_INJECT(ERRINJ_VY_RUN_DISCARD,
 		     {say_error("error injection: run %lld not discarded",
@@ -1607,6 +1612,13 @@ vy_range_discard_new_run(struct vy_range *range)
 		say_warn("failed to log run %lld deletion: %s",
 			 (long long)run_id, e->errmsg);
 	}
+}
+
+static inline void
+vy_range_discard_new_run(struct vy_range *range)
+{
+	vy_run_discard(range->new_run);
+	range->new_run = NULL;
 }
 
 /** Return true if a task was scheduled for a given range. */
@@ -3340,7 +3352,7 @@ vy_index_create(struct vy_index *index)
 		rc = mkdir(index->path, 0777);
 		if (rc == -1 && errno != EEXIST) {
 			diag_set(SystemError, "failed to create directory '%s'",
-		                 index->path);
+				 index->path);
 			*path_sep = '/';
 			return -1;
 		}
@@ -4436,7 +4448,7 @@ vy_task_compact_new(struct mempool *pool, struct vy_range *range,
 
 	say_info("%s: started compacting range %s, runs %d/%d",
 		 index->name, vy_range_str(range),
-                 range->compact_priority, range->run_count);
+		 range->compact_priority, range->run_count);
 	*p_task = task;
 	return 0;
 err_wi:
@@ -5439,7 +5451,7 @@ vy_index_conf_create(struct vy_index *conf, struct key_def *key_def)
 {
 	char name[128];
 	snprintf(name, sizeof(name), "%" PRIu32 "/%" PRIu32,
-	         key_def->space_id, key_def->iid);
+		 key_def->space_id, key_def->iid);
 	conf->name = strdup(name);
 	/* path */
 	if (key_def->opts.path[0] == '\0') {
@@ -6183,7 +6195,7 @@ vy_check_dup_key(struct vy_tx *tx, struct vy_index *idx, const char *key,
 	 * Expect a full tuple as input (secondary key || primary key)
 	 * but use only  the secondary key fields (partial key look
 	 * up) to check for duplicates.
-         */
+	 */
 	assert(part_count == idx->key_def->part_count);
 	if (vy_index_get(tx, idx, key, idx->user_key_def->part_count, &found))
 		return -1;
@@ -7271,7 +7283,7 @@ vy_env_new(void)
 
 	struct slab_cache *slab_cache = cord_slab_cache();
 	mempool_create(&e->cursor_pool, slab_cache,
-	               sizeof(struct vy_cursor));
+		       sizeof(struct vy_cursor));
 	mempool_create(&e->read_task_pool, slab_cache,
 		       sizeof(struct vy_page_read_task));
 	lsregion_create(&e->allocator, slab_cache->arena);
@@ -8790,7 +8802,7 @@ vy_txw_iterator_next_key(struct vy_stmt_iterator *vitr, struct tuple **ret,
 		itr->curr_txv = NULL;
 	if (itr->curr_txv != NULL && itr->iterator_type == ITER_EQ &&
 	    vy_stmt_compare(itr->key, itr->curr_txv->stmt,
-	    		    itr->index->key_def) != 0)
+			    itr->index->key_def) != 0)
 		itr->curr_txv = NULL;
 	if (itr->curr_txv != NULL)
 		*ret = itr->curr_txv->stmt;
