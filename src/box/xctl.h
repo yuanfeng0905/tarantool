@@ -160,7 +160,7 @@ struct xctl_record {
 	uint32_t path_len;
 	/**
 	 * True if the range is on the zero level of the index
-	 * ranges tree.
+	 * ranges tree (i.e. this is infinirange of an index).
 	 */
 	bool is_level_zero;
 };

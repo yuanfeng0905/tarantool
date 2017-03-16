@@ -18,7 +18,8 @@ for _, v in ipairs({ 'path', 'build', 'tx_latency', 'cursor_latency',
                      'page_count', 'memory_used', 'run_max', 'run_histogram',
                      'size', 'size_uncompressed', 'used', 'count', 'rps',
                      'total', 'dumped_statements', 'bandwidth', 'avg', 'max',
-                     'watermark' }) do
+                     'watermark', 'distributions_count',
+                     'active_distributions_count' }) do
     test_run:cmd("push filter '"..v..": .*' to '"..v..": <"..v..">'")
 end;
 test_run:cmd("setopt delimiter ''");

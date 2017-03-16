@@ -31,7 +31,6 @@ while vyinfo().range_count < range_count do
     fiber.sleep(0.01)
 end;
 test_run:cmd("setopt delimiter ''");
-
 vyinfo().range_count
 
 -- Delete 90% of keys. Do it in two iterations, calling snapshot after
@@ -44,16 +43,31 @@ for i = 1,2 do
     box.snapshot()
 end;
 test_run:cmd("setopt delimiter ''");
+-- Wait until dispensaction is over.
+while vyinfo().active_distributions_count ~= 0 do fiber.sleep(0.01) end
+vyinfo().run_count
+vyinfo().range_count
 
--- Wait until compaction is over (ranges being compacted can't be coalesced)
+-- Trigger ranges dispensation and compaction by calling snapshot.
+_ = s:replace(gen_tuple(16))
+_ = s:replace(gen_tuple(48))
+_ = s:replace(gen_tuple(80)) box.snapshot()
+_ = s:replace(gen_tuple(112)) box.snapshot()
+
+-- Wait dispensaction ending.
+while vyinfo().active_distributions_count ~= 0 do fiber.sleep(0.01) end
+-- Wait compaction ending.
 while vyinfo().range_count ~= vyinfo().run_count do fiber.sleep(0.01) end
 
--- Trigger range coalescing by calling snapshot.
-s:replace(gen_tuple(math.random(1, key_count))) box.snapshot()
+-- Trigger ranges coalesce by calling snapshot.
+_ = s:replace(gen_tuple(17))
+_ = s:replace(gen_tuple(49))
+_ = s:replace(gen_tuple(81)) box.snapshot()
+_ = s:replace(gen_tuple(113)) box.snapshot()
 
--- Wait until adjacent ranges are coalesced
-while vyinfo().range_count > 1 do fiber.sleep(0.01) end
-
+-- Each step of the dispensaction makes coalesce of
+-- the corresponding range
+while vyinfo().active_distributions_count ~= 0 do fiber.sleep(0.01) end
 vyinfo().range_count
 
 -- Check the remaining keys.

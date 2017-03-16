@@ -1816,6 +1816,13 @@ xctl_recovery_iterate_vy_index(struct vy_index_recovery_info *index,
 		record.type = XCTL_INSERT_VY_RANGE;
 		record.vy_range_id = INT64_MAX; /* fake id */
 		record.vy_range_begin = record.vy_range_end = NULL;
+		/*
+		 * Insert one for the ranges tree and one for the
+		 * global index range.
+		 */
+		if (xctl_recovery_cb_call(cb, cb_arg, &record) != 0)
+			return -1;
+		record.is_level_zero = true;
 		if (xctl_recovery_cb_call(cb, cb_arg, &record) != 0)
 			return -1;
 		record.type = XCTL_DROP_VY_INDEX;
@@ -1835,6 +1842,7 @@ xctl_recovery_iterate_vy_index(struct vy_index_recovery_info *index,
 		if (mp_decode_array(&tmp) == 0)
 			record.vy_range_begin = NULL;
 		record.vy_range_end = tmp = range->end;
+		record.is_level_zero = range->is_level_zero;
 		if (mp_decode_array(&tmp) == 0)
 			record.vy_range_end = NULL;
 		if (xctl_recovery_cb_call(cb, cb_arg, &record) != 0)

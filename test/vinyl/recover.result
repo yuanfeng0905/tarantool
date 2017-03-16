@@ -34,6 +34,9 @@ test_run = require('test_run').new()
 errinj = box.error.injection
 ---
 ...
+fiber = require('fiber')
+---
+...
 s = box.schema.space.create('test', {engine='vinyl'})
 ---
 ...
@@ -72,6 +75,9 @@ errinj.set("ERRINJ_VY_RANGE_SPLIT", true)
 - ok
 ...
 for i=5,6 do gen(i) end
+---
+...
+while box.info.vinyl().db[s.id..'/0'].run_count ~= 2 do fiber.sleep(0.01) end
 ---
 ...
 -- Check that the total size of data stored on disk, the number of pages,

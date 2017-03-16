@@ -30,6 +30,7 @@
 --
 test_run = require('test_run').new()
 errinj = box.error.injection
+fiber = require('fiber')
 
 s = box.schema.space.create('test', {engine='vinyl'})
 _ = s:create_index('primary')
@@ -52,6 +53,8 @@ for i=1,4 do gen(i) end
 errinj.set("ERRINJ_VY_RANGE_SPLIT", true)
 for i=5,6 do gen(i) end
 
+while box.info.vinyl().db[s.id..'/0'].run_count ~= 2 do fiber.sleep(0.01) end
+
 -- Check that the total size of data stored on disk, the number of pages,
 -- and the number of runs are the same before and after recovery.
 tmp = box.schema.space.create('tmp')
@@ -68,7 +71,6 @@ vyinfo2 = box.info.vinyl().db[s.id .. '/0']
 vyinfo1.size == vyinfo2.size or {vyinfo1.size, vyinfo2.size}
 vyinfo1.page_count == vyinfo2.page_count or {vyinfo1.page_count, vyinfo2.page_count}
 vyinfo1.run_count == vyinfo2.run_count or {vyinfo1.run_count, vyinfo2.run_count}
-
 tmp:drop()
 
 test_run:cmd("setopt delimiter ';'")
