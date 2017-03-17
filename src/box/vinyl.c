@@ -2057,30 +2057,30 @@ vy_page_info_destroy(struct vy_page_info *page_info)
  * @retval -1 for error
  */
 static int
-vy_row_index_encode(const uint32_t *row_index, uint32_t count,
+vy_page_index_encode(const uint32_t *row_index, uint32_t count,
 		    struct xrow_header *xrow)
 {
 	memset(xrow, 0, sizeof(*xrow));
-	xrow->type = IPROTO_REPLACE;
+	xrow->type = VY_META_PAGE_INDEX;
 
-	struct request request;
-	request_create(&request, IPROTO_REPLACE);
-	size_t tuple_size = mp_sizeof_array(1) +
-			    mp_sizeof_bin(sizeof(uint32_t) * count);
-	char *tuple = region_alloc(&fiber()->gc, tuple_size);
-	if (tuple == NULL) {
-		diag_set(OutOfMemory, tuple_size, "region", "row index");
+	size_t size = mp_sizeof_map(1) +
+		      mp_sizeof_uint(VY_PAGE_INDEX) +
+		      mp_sizeof_bin(sizeof(uint32_t) * count);
+	char *pos = region_alloc(&fiber()->gc, size);
+	if (pos == NULL) {
+		diag_set(OutOfMemory, size, "region", "row index");
 		return -1;
 	}
-	request.tuple = tuple;
-	tuple = mp_encode_array(tuple, 1);
-	tuple = mp_encode_binl(tuple, sizeof(uint32_t) * count);
+	xrow->body->iov_base = pos;
+	pos = mp_encode_map(pos, 1);
+	pos = mp_encode_uint(pos, VY_PAGE_INDEX);
+	pos = mp_encode_binl(pos, sizeof(uint32_t) * count);
 	for (uint32_t i = 0; i < count; ++i)
-		tuple = mp_store_u32(tuple, row_index[i]);
-	request.tuple_end = tuple;
-	assert(request.tuple_end == request.tuple + tuple_size);
-	xrow->bodycnt = request_encode(&request, xrow->body);
-	return xrow->bodycnt >= 0 ? 0 : -1;
+		pos = mp_store_u32(pos, row_index[i]);
+	xrow->body->iov_len = (void *)pos - xrow->body->iov_base;
+	assert(xrow->body->iov_len == size);
+	xrow->bodycnt = 1;
+	return 0;
 }
 
 /**
@@ -2159,7 +2159,7 @@ vy_run_write_page(struct vy_run_info *run_info, struct xlog *data_xlog,
 	struct xrow_header xrow;
 	const uint32_t *row_index = (const uint32_t *) row_index_buf.rpos;
 	assert(ibuf_used(&row_index_buf) == sizeof(uint32_t) * page->count);
-	if (vy_row_index_encode(row_index, page->count, &xrow) < 0)
+	if (vy_page_index_encode(row_index, page->count, &xrow) < 0)
 		goto error_rollback;
 
 	ssize_t written = xlog_write_row(data_xlog, &xrow);
@@ -2261,24 +2261,22 @@ err:
 
 /** {{{ vy_page_info */
 
-enum vy_request_page_key {
-	VY_PAGE_REQUEST_COUNT = 1,
-	VY_PAGE_MIN_KEY = 2,
-	VY_PAGE_DATA_SIZE = 3,
-	VY_PAGE_ROW_INDEX_OFFSET = 4
-};
-
-const char *vy_page_info_key_strs[] = {
+const char *vy_page_info_key_strs[VY_PAGE_KEY_MAX] = {
+	"",
+	"offset",
+	"size",
 	"count",
 	"min",
 	"data size",
 	"row index"
 };
 
-const uint64_t vy_page_info_key_map = (1 << VY_PAGE_REQUEST_COUNT) |
+const uint64_t vy_page_info_key_map = (1 << VY_PAGE_OFFSET) |
+				      (1 << VY_PAGE_SIZE) |
+				      (1 << VY_PAGE_REQUEST_COUNT) |
 				      (1 << VY_PAGE_MIN_KEY) |
 				      (1 << VY_PAGE_DATA_SIZE) |
-				      (1 << VY_PAGE_ROW_INDEX_OFFSET);
+				      (1 << VY_PAGE_INDEX_OFFSET);
 
 /**
  * Encode vy_page_info as xrow.
@@ -2296,9 +2294,6 @@ vy_page_info_encode(const struct vy_page_info *page_info,
 {
 	struct region *region = &fiber()->gc;
 
-	struct request request;
-	request_create(&request, IPROTO_REPLACE);
-
 	uint32_t min_key_size;
 	const char *tmp = page_info->min_key;
 	assert(mp_typeof(*tmp) == MP_ARRAY);
@@ -2308,18 +2303,18 @@ vy_page_info_encode(const struct vy_page_info *page_info,
 	/* calc tuple size */
 	uint32_t size;
 	/* 3 items: page offset, size, and map */
-	size = mp_sizeof_array(3) +
+	size = mp_sizeof_map(6) +
+	       mp_sizeof_uint(VY_PAGE_OFFSET) +
 	       mp_sizeof_uint(page_info->offset) +
+	       mp_sizeof_uint(VY_PAGE_SIZE) +
 	       mp_sizeof_uint(page_info->size) +
-	       /* page map contains 4 items */
-	       mp_sizeof_map(4) +
 	       mp_sizeof_uint(VY_PAGE_REQUEST_COUNT) +
 	       mp_sizeof_uint(page_info->count) +
 	       mp_sizeof_uint(VY_PAGE_MIN_KEY) +
 	       min_key_size +
 	       mp_sizeof_uint(VY_PAGE_DATA_SIZE) +
 	       mp_sizeof_uint(page_info->unpacked_size) +
-	       mp_sizeof_uint(VY_PAGE_ROW_INDEX_OFFSET) +
+	       mp_sizeof_uint(VY_PAGE_INDEX_OFFSET) +
 	       mp_sizeof_uint(page_info->row_index_offset);
 
 	char *pos = region_alloc(region, size);
@@ -2327,12 +2322,15 @@ vy_page_info_encode(const struct vy_page_info *page_info,
 		diag_set(OutOfMemory, size, "region", "page encode");
 		return -1;
 	}
-	/* encode tuple */
-	request.tuple = pos;
-	pos = mp_encode_array(pos, 3);
+
+	memset(xrow, 0, sizeof(*xrow));
+	/* encode page */
+	xrow->body->iov_base = pos;
+	pos = mp_encode_map(pos, 6);
+	pos = mp_encode_uint(pos, VY_PAGE_OFFSET);
 	pos = mp_encode_uint(pos, page_info->offset);
+	pos = mp_encode_uint(pos, VY_PAGE_SIZE);
 	pos = mp_encode_uint(pos, page_info->size);
-	pos = mp_encode_map(pos, 4);
 	pos = mp_encode_uint(pos, VY_PAGE_REQUEST_COUNT);
 	pos = mp_encode_uint(pos, page_info->count);
 	pos = mp_encode_uint(pos, VY_PAGE_MIN_KEY);
@@ -2340,14 +2338,12 @@ vy_page_info_encode(const struct vy_page_info *page_info,
 	pos += min_key_size;
 	pos = mp_encode_uint(pos, VY_PAGE_DATA_SIZE);
 	pos = mp_encode_uint(pos, page_info->unpacked_size);
-	pos = mp_encode_uint(pos, VY_PAGE_ROW_INDEX_OFFSET);
+	pos = mp_encode_uint(pos, VY_PAGE_INDEX_OFFSET);
 	pos = mp_encode_uint(pos, page_info->row_index_offset);
-	request.tuple_end = pos;
+	xrow->body->iov_len = (void *)pos - xrow->body->iov_base;
+	xrow->bodycnt = 1;
 
-	memset(xrow, 0, sizeof(*xrow));
-	xrow->type = IPROTO_REPLACE;
-	if ((xrow->bodycnt = request_encode(&request, xrow->body)) < 0)
-		return -1;
+	xrow->type = VY_META_PAGE_INFO;
 	return 0;
 }
 
@@ -2363,23 +2359,9 @@ vy_page_info_encode(const struct vy_page_info *page_info,
 static int
 vy_page_info_decode(struct vy_page_info *page, const struct xrow_header *xrow)
 {
-	struct request request;
-	/* extract all pages info */
-	request_create(&request, xrow->type);
-	if (request_decode(&request, xrow->body->iov_base,
-			   xrow->body->iov_len) != 0)
-		return -1;
-	const char *pos = request.tuple;
-	if (mp_decode_array(&pos) < 3) {
-		diag_set(ClientError, ER_VINYL, "Can't decode page meta "
-			 "tuple is too small");
-		return -1;
-	}
-
+	assert(xrow->type == VY_META_PAGE_INFO);
+	const char *pos = xrow->body->iov_base;
 	memset(page, 0, sizeof(*page));
-	page->offset = mp_decode_uint(&pos);
-	page->size = mp_decode_uint(&pos);
-
 	uint64_t key_map = vy_page_info_key_map;
 	uint32_t map_size = mp_decode_map(&pos);
 	uint32_t map_item;
@@ -2388,6 +2370,12 @@ vy_page_info_decode(struct vy_page_info *page, const struct xrow_header *xrow)
 		uint32_t key = mp_decode_uint(&pos);
 		key_map &= ~(1 << key);
 		switch (key) {
+		case VY_PAGE_OFFSET:
+			page->offset = mp_decode_uint(&pos);
+			break;
+		case VY_PAGE_SIZE:
+			page->size = mp_decode_uint(&pos);
+			break;
 		case VY_PAGE_REQUEST_COUNT:
 			page->count = mp_decode_uint(&pos);
 			break;
@@ -2401,18 +2389,22 @@ vy_page_info_decode(struct vy_page_info *page, const struct xrow_header *xrow)
 		case VY_PAGE_DATA_SIZE:
 			page->unpacked_size = mp_decode_uint(&pos);
 			break;
-		case VY_PAGE_ROW_INDEX_OFFSET:
+		case VY_PAGE_INDEX_OFFSET:
 			page->row_index_offset = mp_decode_uint(&pos);
 			break;
-		default:
-			diag_set(ClientError, ER_VINYL, "Can't decode page meta "
-				 "unknown page meta key %d", key);
+		default: {
+				char errmsg[512];
+				snprintf(errmsg, sizeof(errmsg), "%s %d",
+					"Can't decode page info: unknown key ",
+					key);
+				diag_set(ClientError, ER_VINYL, errmsg);
+			}
 			return -1;
 		}
 	}
 	if (key_map) {
 		diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-			 vy_page_info_key_strs[__builtin_ffsll(key_map) - 1]);
+			 vy_page_info_key_strs[__builtin_ffsll(key_map)]);
 		return -1;
 	}
 
@@ -2423,17 +2415,8 @@ vy_page_info_decode(struct vy_page_info *page, const struct xrow_header *xrow)
 
 /** {{{ vy_run_info */
 
-/**
- * Keys for msgpuck run encoding
- */
-enum vy_request_run_key {
-	VY_RUN_MIN_LSN = 1,
-	VY_RUN_MAX_LSN = 2,
-	VY_RUN_PAGE_COUNT = 3,
-	VY_RUN_BLOOM = 4,
-};
-
-const char *vy_run_info_key_strs[] = {
+const char *vy_run_info_key_strs[VY_RUN_KEY_MAX] = {
+	"",
 	"min lsn",
 	"max lsn",
 	"page count",
@@ -2519,11 +2502,7 @@ vy_run_info_encode(const struct vy_run_info *run_info,
 		   struct xrow_header *xrow)
 {
 	assert(run_info->has_bloom);
-	size_t size = mp_sizeof_array(1);
-	/*
-	 * run map size: min lsn, max lsn, page count
-	 */
-	size += mp_sizeof_map(4);
+	size_t size = mp_sizeof_map(4);
 	size += mp_sizeof_uint(VY_RUN_MIN_LSN) +
 		mp_sizeof_uint(run_info->min_lsn);
 	size += mp_sizeof_uint(VY_RUN_MAX_LSN) +
@@ -2533,14 +2512,14 @@ vy_run_info_encode(const struct vy_run_info *run_info,
 	size += mp_sizeof_uint(VY_RUN_BLOOM) +
 		vy_run_bloom_encode_size(&run_info->bloom);
 
-	char *tuple = region_alloc(&fiber()->gc, size);
-	if (tuple == NULL) {
+	char *pos = region_alloc(&fiber()->gc, size);
+	if (pos == NULL) {
 		diag_set(OutOfMemory, size, "region", "run encode");
 		return -1;
 	}
-	char *pos = tuple;
+	memset(xrow, 0, sizeof(*xrow));
+	xrow->body->iov_base = pos;
 	/* encode values */
-	pos = mp_encode_array(pos, 1);
 	pos = mp_encode_map(pos, 4);
 	pos = mp_encode_uint(pos, VY_RUN_MIN_LSN);
 	pos = mp_encode_uint(pos, run_info->min_lsn);
@@ -2550,18 +2529,10 @@ vy_run_info_encode(const struct vy_run_info *run_info,
 	pos = mp_encode_uint(pos, run_info->count);
 	pos = mp_encode_uint(pos, VY_RUN_BLOOM);
 	pos = vy_run_bloom_encode(pos, &run_info->bloom);
-
-	/* put tuple in a replace request to run's space */
-	struct request request;
-	request_create(&request, IPROTO_REPLACE);
-	request.tuple = tuple;
-	request.tuple_end = pos;
-	memset(xrow, 0, sizeof(*xrow));
-	xrow->type = IPROTO_REPLACE;
+	xrow->body->iov_len = (void *)pos - xrow->body->iov_base;
+	xrow->bodycnt = 1;
+	xrow->type = VY_META_RUN_INFO;
 	xrow->lsn = run_info->min_lsn;
-	if ((xrow->bodycnt = request_encode(&request, xrow->body)) < 0)
-		return -1;
-
 	return 0;
 }
 
@@ -2578,20 +2549,9 @@ static int
 vy_run_info_decode(struct vy_run_info *run_info,
 		   const struct xrow_header *xrow)
 {
-	struct request request;
-	request_create(&request, xrow->type);
-	if (request_decode(&request, xrow->body->iov_base,
-			   xrow->body->iov_len)) {
-		return -1;
-	}
-
+	assert(xrow->type == VY_META_RUN_INFO);
 	/* decode run */
-	const char *pos = request.tuple;
-	if (mp_decode_array(&pos) < 1) {
-		diag_set(ClientError, ER_VINYL, "Can't decode run meta: "
-			 "not enough values");
-		return -1;
-	}
+	const char *pos = xrow->body->iov_base;
 	memset(run_info, 0, sizeof(*run_info));
 	uint64_t key_map = vy_run_info_key_map;
 	uint32_t map_size = mp_decode_map(&pos);
@@ -2624,7 +2584,7 @@ vy_run_info_decode(struct vy_run_info *run_info,
 	}
 	if (key_map) {
 		diag_set(ClientError, ER_MISSING_REQUEST_FIELD,
-			 vy_run_info_key_strs[__builtin_ffsll(key_map) - 1]);
+			 vy_run_info_key_strs[__builtin_ffsll(key_map)]);
 		return -1;
 	}
 	return 0;
@@ -2654,7 +2614,9 @@ vy_run_write_index(struct vy_run *run, const char *dirpath)
 
 	struct xrow_header xrow;
 	if (vy_run_info_encode(&run->info, &xrow) != 0 ||
-	    xlog_write_row(&index_xlog, &xrow) < 0)
+	    xlog_write_row(&index_xlog, &xrow) < 0 ||
+	    xlog_tx_commit(&index_xlog) < 0 ||
+	    xlog_flush(&index_xlog) < 0)
 		goto fail;
 
 	for (uint32_t page_no = 0; page_no < run->info.count; ++page_no) {
@@ -2742,6 +2704,7 @@ fail:
 static int
 vy_run_recover(struct vy_run *run, const char *dir)
 {
+	int rc;
 	char path[PATH_MAX];
 	vy_run_snprint_path(path, sizeof(path), dir, run->id, VY_FILE_INDEX);
 	struct xlog_cursor cursor;
@@ -2758,11 +2721,20 @@ vy_run_recover(struct vy_run *run, const char *dir)
 	/* Read run header. */
 	struct xrow_header xrow;
 	/* all rows should be in one tx */
-	if (xlog_cursor_next_tx(&cursor) != 0 ||
-	    xlog_cursor_next_row(&cursor, &xrow) != 0 ||
-	    vy_run_info_decode(&run->info, &xrow) != 0) {
+	if ((rc = xlog_cursor_next_tx(&cursor)) != 0 ||
+	    (rc = xlog_cursor_next_row(&cursor, &xrow)) != 0) {
+		if (rc > 0)
+			diag_set(ClientError, ER_VINYL,
+				 "Can't open run info xlog tx");
 		goto fail_close;
 	}
+
+	if (xrow.type != VY_META_RUN_INFO) {
+		diag_set(ClientError, ER_VINYL, "Invalid run info type");
+		return -1;
+	}
+	if (vy_run_info_decode(&run->info, &xrow) != 0)
+		goto fail_close;
 
 	/* Allocate buffer for page info. */
 	run->info.page_infos = calloc(run->info.count,
@@ -2771,6 +2743,14 @@ vy_run_recover(struct vy_run *run, const char *dir)
 		diag_set(OutOfMemory,
 			 run->info.count * sizeof(struct vy_page_info),
 			 "malloc", "struct vy_page_info");
+		goto fail_close;
+	}
+
+	/* Open next xlog tx with pages */
+	if ((rc = xlog_cursor_next_tx(&cursor)) != 0) {
+		if (rc > 0)
+			diag_set(ClientError, ER_VINYL,
+				 "Unexpected end of run meta file");
 		goto fail_close;
 	}
 
@@ -2787,6 +2767,10 @@ vy_run_recover(struct vy_run *run, const char *dir)
 			 * successfully created pages.
 			 */
 			run->info.count = page_no;
+			goto fail_close;
+		}
+		if (xrow.type != VY_META_PAGE_INFO) {
+			diag_set(ClientError, ER_VINYL, "Invalid page info type");
 			goto fail_close;
 		}
 		struct vy_page_info *page = run->info.page_infos + page_no;
@@ -7543,31 +7527,33 @@ vy_run_iterator_cache_clean(struct vy_run_iterator *itr)
 }
 
 static int
-vy_row_index_decode(uint32_t *row_index, uint32_t count,
+vy_page_index_decode(uint32_t *row_index, uint32_t count,
 		    struct xrow_header *xrow)
 {
-	struct request request;
-	request_create(&request, xrow->type);
-	if (request_decode(&request, xrow->body->iov_base,
-			   xrow->body->iov_len) == -1) {
+	assert(xrow->type == VY_META_PAGE_INDEX);
+	const char *pos = xrow->body->iov_base;
+	uint32_t map_size = mp_decode_map(&pos);
+	uint32_t map_item;
+	uint32_t size = 0;
+	for (map_item = 0; map_item < map_size; ++map_item) {
+		uint32_t key = mp_decode_uint(&pos);
+		switch (key) {
+		case VY_PAGE_INDEX:
+			size = mp_decode_binl(&pos);
+			break;
+		}
+	}
+	if (size != sizeof(uint32_t) * count) {
+		diag_set(ClientError, ER_VINYL, "Invalid page index size");
 		return -1;
 	}
-	if (request.tuple == NULL) {
-error:
-		diag_set(ClientError, ER_VINYL, "Can't decode row index");
-		return -1;
-	}
-	const char *pos = request.tuple;
-	if (mp_decode_array(&pos) != 1)
-		goto error;
-	uint32_t size = mp_decode_binl(&pos);
-	if (size != sizeof(uint32_t) * count)
-		goto error;
-	for (uint32_t i = 0; i < count; ++i)
+	for (uint32_t i = 0; i < count; ++i) {
 		row_index[i] = mp_load_u32(&pos);
-	assert(pos == request.tuple_end);
+	}
+	assert(pos == xrow->body->iov_base + xrow->body->iov_len);
 	return 0;
 }
+
 /**
  * Read a page requests from vinyl xlog data file.
  *
@@ -7612,7 +7598,11 @@ vy_page_read(struct vy_page *page, const struct vy_page_info *page_info, int fd,
 	data_end = page->data + page_info->unpacked_size;
 	if (xrow_header_decode(&xrow, &data_pos, data_end) == -1)
 		goto error;
-	if (vy_row_index_decode(page->row_index, page->count, &xrow) != 0)
+	if (xrow.type != VY_META_PAGE_INDEX) {
+		diag_set(ClientError, ER_VINYL, "Invalid page index type");
+		goto error;
+	}
+	if (vy_page_index_decode(page->row_index, page->count, &xrow) != 0)
 		goto error;
 	region_truncate(&fiber()->gc, region_svp);
 	ERROR_INJECT(ERRINJ_VY_READ_PAGE, {

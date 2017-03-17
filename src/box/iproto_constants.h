@@ -137,6 +137,19 @@ enum iproto_type {
 	IPROTO_JOIN = 65,
 	IPROTO_SUBSCRIBE = 66,
 	IPROTO_TYPE_ADMIN_MAX = IPROTO_SUBSCRIBE + 1,
+
+	VY_META_RUN_INFO = 760,
+	VY_META_PAGE_INFO = 761,
+	VY_META_PAGE_INDEX = 762,
+	VY_XCTL_CREATE_INDEX = 763,
+	VY_XCTL_DROP_INDEX = 764,
+	VY_XCTL_INSERT_RANGE = 765,
+	VY_XCTL_DELETE_RANGE = 766,
+	VY_XCTL_PREPARE_RUN = 767,
+	VY_XCTL_INSERT_RUN = 768,
+	VY_XCTL_DELETE_RUN = 769,
+	VY_XCTL_FORGET_RUN = 770,
+
 	/* command failed = (IPROTO_TYPE_ERROR | ER_XXX from errcode.h) */
 	IPROTO_TYPE_ERROR = 1 << 15
 };
@@ -207,6 +220,51 @@ struct PACKED request_replace_body {
 	uint32_t v_space_id;
 	uint8_t k_tuple;
 };
+
+/*
+ * Vinyl keys
+ */
+enum vy_request_run_key {
+	VY_RUN_MIN_LSN = 1,
+	VY_RUN_MAX_LSN = 2,
+	VY_RUN_PAGE_COUNT = 3,
+	VY_RUN_BLOOM = 4,
+	VY_RUN_KEY_MAX = VY_RUN_BLOOM + 1
+};
+
+extern const char *vy_run_info_key_strs[VY_RUN_KEY_MAX];
+
+enum vy_request_page_key {
+	VY_PAGE_OFFSET = 1,
+	VY_PAGE_SIZE = 2,
+	VY_PAGE_REQUEST_COUNT = 3,
+	VY_PAGE_MIN_KEY = 4,
+	VY_PAGE_DATA_SIZE = 5,
+	VY_PAGE_INDEX_OFFSET = 6,
+	VY_PAGE_INDEX = 7,
+	VY_PAGE_KEY_MAX = VY_PAGE_INDEX_OFFSET + 1
+};
+
+extern const char *vy_page_info_key_strs[VY_PAGE_KEY_MAX];
+
+/**
+ * Integer key of a field in the xctl_record structure.
+ * Used for packing a record in MsgPack.
+ */
+enum xctl_key {
+	XCTL_KEY_VY_INDEX_ID		= 0,
+	XCTL_KEY_VY_RANGE_ID		= 1,
+	XCTL_KEY_VY_RUN_ID		= 2,
+	XCTL_KEY_VY_RANGE_BEGIN		= 3,
+	XCTL_KEY_VY_RANGE_END		= 4,
+	XCTL_KEY_IID			= 5,
+	XCTL_KEY_SPACE_ID		= 6,
+	XCTL_KEY_PATH			= 7,
+	XCTL_KEY_MAX			= XCTL_KEY_PATH + 1
+};
+
+/** xctl_key -> human readable name. */
+extern const char *xctl_key_name[];
 
 #if defined(__cplusplus)
 } /* extern "C" */

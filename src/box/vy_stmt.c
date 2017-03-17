@@ -454,8 +454,6 @@ vy_stmt_encode(const struct tuple *value, const struct key_def *key_def,
 
 	struct request request;
 	request_create(&request, type);
-	request.space_id = key_def->space_id;
-	request.index_id = key_def->iid;
 	uint32_t size;
 	const char *extracted = NULL;
 	if (key_def->iid != 0 || type == IPROTO_DELETE) {

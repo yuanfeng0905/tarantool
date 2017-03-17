@@ -35,6 +35,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "iproto_constants.h"
+
 /*
  * Data stored in vinyl is organized in ranges and runs.
  * Runs correspond to data files written to disk, while
@@ -120,6 +122,9 @@ enum xctl_record_type {
 
 	xctl_record_type_MAX
 };
+
+static_assert(VY_XCTL_FORGET_RUN - VY_XCTL_CREATE_INDEX == xctl_record_type_MAX - 1,
+	      "xctl record types and corresponding xrow request types should match");
 
 /** Record in the metadata log. */
 struct xctl_record {
