@@ -13,14 +13,13 @@
 %global __debug_install_post %{nil}
 %global __debug_package %{nil}
 
-%bcond_without postgresql
 %bcond_without mysql
 %bcond_without client
 
 %if 0%{?rhel} < 7 && 0%{?rhel} > 0
 BuildRequires: cmake28
-BuildRequires: devtoolset-2-toolchain
-BuildRequires: devtoolset-2-binutils-devel
+BuildRequires: devtoolset-6-toolchain
+BuildRequires: devtoolset-6-binutils-devel
 %else
 BuildRequires: cmake >= 2.8
 BuildRequires: gcc >= 4.5
@@ -94,22 +93,6 @@ It supports replication, online backup, stored procedures in Lua.
 This package provides a common sql interface to use with
 tarantool-pg-module or by tarantool-mysql-module.
 
-%if %{with postgresql}
-%package pg-module
-Summary: Tarantool common sql interface
-Vendor: tarantool.org
-Group: Applications/Databases
-Provides: %{?scl_prefix}tarantool-pg-module
-BuildRequires: postgresql-devel >= 9.0
-Requires: postgresql-libs >= 9.0
-%description pg-module
-Tarantool is a high performance in-memory NoSQL database.
-It supports replication, online backup, stored procedures in Lua.
-
-This package provides a PostgreSQL interface to use with
-tarantool-sql-module.
-%endif
-
 %if %{with mysql}
 %package mysql-module
 Summary: Tarantool common sql interface
@@ -157,7 +140,7 @@ with history support.
     end
     function wrap_with_toolset(cmd)
         local cmd = rpm.expand(cmd)
-        local devtoolset = 'scl enable devtoolset-2 %q\n'
+        local devtoolset = 'scl enable devtoolset-6 %q\n'
         if is_rhel_old() then
             return string.format(devtoolset, cmd)
         end
@@ -195,7 +178,6 @@ with history support.
         .. ' %{!?scl:-DENABLE_RPM=ON}'
         .. ' %{?scl:-DENABLE_RPM_SCL=ON}'
         .. dev_with('client', 'ENABLE_CLIENT')
-        .. dev_with('postgresql', 'WITH_POSTGRESQL')
         .. dev_with('mysql', 'WITH_MYSQL')
 
     print(wrap_with_toolset(cmd))
@@ -242,14 +224,6 @@ useradd -r -g tarantool tarantool > /dev/null 2>&1
 %dir "%{_datadir}/tarantool/box"
 %dir "%{_datadir}/tarantool/box/net"
 "%{_datadir}/tarantool/box/net/sql.lua"
-
-%if %{with postgresql}
-%files pg-module
-%defattr(-,root,root,-)
-%dir "%{_libdir}/tarantool/"
-%dir "%{_libdir}/tarantool/box"
-"%{_libdir}/tarantool/box/net/pg.so"
-%endif
 
 %if %{with mysql}
 %files mysql-module
