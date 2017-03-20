@@ -225,8 +225,7 @@ curl_remove_sock(struct curl_sock *f, struct curl_ctx *ctx)
 		ev_io_stop(loop(), &f->ev);
 
 	++ctx->stat.sockets_deleted;
-
-	free(f);
+	mempool_free(&ctx->sock_pool, f);
 }
 
 
@@ -264,10 +263,12 @@ static int
 curl_add_sock(curl_socket_t s, CURL *easy, int action, struct curl_ctx *ctx)
 {
 	struct curl_sock *fdp = (struct curl_sock *)
-		malloc(sizeof(struct curl_sock));
-	if (fdp == NULL)
+		mempool_alloc(&ctx->sock_pool);
+	if (fdp == NULL) {
+		diag_set(OutOfMemory, sizeof(struct curl_sock),
+				"mempool_alloc", "curl");
 		return -1;
-
+	}
 	say_debug("add_sock");
 	memset(fdp, 0, sizeof(struct curl_sock));
 
@@ -483,8 +484,8 @@ curl_response_new(struct curl_ctx* ctx)
 		return NULL;
 	}
 	resp->ctx = ctx;
-	ibuf_create(&resp->headers, &cord()->slabc, 0);
-	ibuf_create(&resp->body, &cord()->slabc, 0);
+	ibuf_create(&resp->headers, &cord()->slabc, 1);
+	ibuf_create(&resp->body, &cord()->slabc, 1);
 	ipc_cond_create(&resp->cond);
 	return resp;
 }
@@ -503,6 +504,8 @@ curl_ctx_create(struct curl_ctx *ctx, bool pipeline, long max_conns)
 			sizeof(struct curl_request));
 	mempool_create(&ctx->resp_pool, &cord()->slabc,
 			sizeof(struct curl_response));
+	mempool_create(&ctx->sock_pool, &cord()->slabc,
+			sizeof(struct curl_sock));
 
 	ctx->multi = curl_multi_init();
 	if (ctx->multi == NULL) {
@@ -542,6 +545,7 @@ curl_ctx_destroy(struct curl_ctx *ctx)
 
 	mempool_destroy(&ctx->req_pool);
 	mempool_destroy(&ctx->resp_pool);
+	mempool_destroy(&ctx->sock_pool);
 }
 
 struct curl_response*

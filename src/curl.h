@@ -64,6 +64,7 @@ struct curl_ctx {
 	/* Memory pools for requests and responses */
 	struct mempool req_pool;
 	struct mempool resp_pool;
+	struct mempool sock_pool;
 
 	/* Various values of statistics, they are used only for all
 	 * Connection in curl context */
