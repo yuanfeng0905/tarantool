@@ -483,8 +483,8 @@ curl_response_new(struct curl_ctx* ctx)
 		return NULL;
 	}
 	resp->ctx = ctx;
-	ibuf_create(&resp->headers, &cord()->slabc, 1);
-	ibuf_create(&resp->body, &cord()->slabc, 1);
+	ibuf_create(&resp->headers, &cord()->slabc, 0);
+	ibuf_create(&resp->body, &cord()->slabc, 0);
 	ipc_cond_create(&resp->cond);
 	return resp;
 }
@@ -688,9 +688,9 @@ curl_set_keepalive(struct curl_request *req, long idle, long interval)
 {
 	assert(req);
 	assert(req->easy);
-	#if (LIBCURL_VERSION_MAJOR >= 7 && \
-	 LIBCURL_VERSION_MINOR >= 25 && \
-	 LIBCURL_VERSION_PATCH >= 0 )
+#if (LIBCURL_VERSION_MAJOR >= 7 && \
+	LIBCURL_VERSION_MINOR >= 25 && \
+	LIBCURL_VERSION_PATCH >= 0 )
 
 	if (idle > 0 && interval > 0) {
 

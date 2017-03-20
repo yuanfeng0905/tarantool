@@ -46,10 +46,10 @@ struct curl_stat {
 	uint64_t total_requests;
 	uint64_t http_200_responses;
 	uint64_t http_other_responses;
-	size_t	 failed_requests;
-	size_t	 active_requests;
-	size_t	 sockets_added;
-	size_t	 sockets_deleted;
+	size_t failed_requests;
+	size_t active_requests;
+	size_t sockets_added;
+	size_t sockets_deleted;
 };
 
 /* Context of curl */
@@ -59,7 +59,7 @@ struct curl_ctx {
 	struct ev_timer timer_event;
 
 	/* Curl multi handler*/
-	CURLM	*multi;
+	CURLM *multi;
 
 	/* Memory pools for requests and responses */
 	struct mempool req_pool;
@@ -96,9 +96,9 @@ struct curl_response {
 	int curl_code;
 	/* Http code */
 	int http_code;
-	/* Reference to string headers */
+	/* buffer of headers */
 	struct ibuf headers;
-	/* Reference to string body */
+	/* buffer of body */
 	struct ibuf body;
 	/* Error message */
 	const char *errmsg;
