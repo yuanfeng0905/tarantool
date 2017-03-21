@@ -1,7 +1,6 @@
 TAP version 13
-1..4
     # basic http post/get
-    1..11
+    1..8
     ok - client is created
     ok - GET: http code page exists
     ok - GET: not empty body page exists
@@ -9,10 +8,7 @@ TAP version 13
     ok - GET: http_code page not exists
     ok - GET: not empty body page not exists
     ok - GET: right body page not exists
-    ok - POST: headers
-    ok - PUT: headers
     ok - stats checking
-    ok - tarantool/curl/issues/3
     # basic http post/get: end
 ok - basic http post/get
     # Errors checks
@@ -34,9 +30,13 @@ ok - Errors checks
     # special methods: end
 ok - special methods
     # tests with server
-    1..5
+    1..9
     ok - HTTP:TRACE request
     ok - HTTP:CONNECT request
+    ok - PUT: headers
+    ok - PUT: body
+    ok - POST: headers
+    ok - POST: body
     ok - Concurrent.Test free sockets
     ok - Concurrent.Test no active requests
     ok - Concurrent.Test timeout not expired

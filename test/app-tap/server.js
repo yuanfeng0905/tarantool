@@ -34,12 +34,40 @@ http.createServer(function (req, res) {
     setTimeout(function () {
         res.writeHead(200, {'Content-Type': 'text/plain'});
         res.end("Hello World");
-    }, 1 )
+    }, 100 )
     }).on('request', function(request, response){
         if (request.method == "TRACE"){
             response.writeHead(200, {'Content-Type': 'text/plain'});
             response.end("");
         }
+	if (request.method == "POST"){
+		var body = [];
+		request.on('data', function (data) {
+    			body.push(data);
+		}).on('end', function () {
+			body = Buffer.concat(body).toString();
+			response.writeHead(200, {'Content-Type': 'application/json'});
+			var json = JSON.stringify({ 
+				headers: request.headers, 
+				data: body, 
+			});
+			response.end(json);
+		});
+	}
+	if (request.method == "PUT"){
+		var body = [];
+		request.on('data', function (data) {
+    			body.push(data);
+		}).on('end', function () {
+			body = Buffer.concat(body).toString();
+			response.writeHead(200, {'Content-Type': 'application/json'});
+			var json = JSON.stringify({ 
+				headers: request.headers, 
+				data: body, 
+			});
+			response.end(json);
+		});
+	}
     }
     ).on('connection', function (socket) {
     socket.setTimeout(10000*2);
