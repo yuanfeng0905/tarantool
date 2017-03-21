@@ -774,6 +774,7 @@ curl_request_delete(struct curl_request *req)
 		free(req->body);
 		req->read = 0;
 		req->sent = 0;
+		req->body = NULL;
 	}
 
 	--req->ctx->stat.active_requests;
