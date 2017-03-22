@@ -114,7 +114,7 @@ const struct key_opts key_opts_default = {
 	/* .dimension           = */ 2,
 	/* .distancebuf         = */ { '\0' },
 	/* .distance            = */ RTREE_INDEX_DISTANCE_TYPE_EUCLID,
-	/* .path                = */ { 0 },
+	/* .path                = */ NULL,
 	/* .range_size          = */ 0,
 	/* .page_size           = */ 0,
 	/* .run_count_per_level = */ 2,
@@ -126,7 +126,7 @@ const struct opt_def key_opts_reg[] = {
 	OPT_DEF("unique", OPT_BOOL, struct key_opts, is_unique),
 	OPT_DEF("dimension", OPT_INT, struct key_opts, dimension),
 	OPT_DEF("distance", OPT_STR, struct key_opts, distancebuf),
-	OPT_DEF("path", OPT_STR, struct key_opts, path),
+	OPT_DEF("path", OPT_STRP, struct key_opts, path),
 	OPT_DEF("range_size", OPT_INT, struct key_opts, range_size),
 	OPT_DEF("page_size", OPT_INT, struct key_opts, page_size),
 	OPT_DEF("run_count_per_level", OPT_INT, struct key_opts, run_count_per_level),
@@ -157,6 +157,12 @@ schema_object_name(enum schema_object_type type)
 	return object_type_strs[type];
 }
 
+static inline size_t
+key_def_sizeof(uint32_t part_count)
+{
+	return sizeof(struct key_def) + sizeof(struct key_part) * part_count;
+}
+
 static void
 key_def_set_cmp(struct key_def *def)
 {
@@ -165,32 +171,23 @@ key_def_set_cmp(struct key_def *def)
 }
 
 struct key_def *
-key_def_new(uint32_t space_id, uint32_t iid, const char *name,
+key_def_new(uint32_t space_id, uint32_t iid, size_t name_len,
 	    enum index_type type, const struct key_opts *opts,
 	    uint32_t part_count)
 {
 	size_t sz = key_def_sizeof(part_count);
+	size_t extra_sz = name_len + 1;
+	struct key_def *def;
+	char *unused_mem;
+	if (opts->path != NULL)
+		extra_sz += strlen(opts->path) + 1;
 	/*
 	 * Use calloc for nullifying all struct key_def attributes including
 	 * comparator pointers.
 	 */
-	struct key_def *def = (struct key_def *) calloc(1, sz);
+	def = (struct key_def *) calloc(1, sz + extra_sz);
 	if (def == NULL) {
 		diag_set(OutOfMemory, sz, "malloc", "struct key_def");
-		return NULL;
-	}
-	unsigned n = snprintf(def->name, sizeof(def->name), "%s", name);
-	if (n >= sizeof(def->name)) {
-		free(def);
-		struct space *space = space_cache_find(space_id);
-		diag_set(ClientError, ER_MODIFY_INDEX, name, space_name(space),
-			 "index name is too long");
-		error_log(diag_last_error(diag_get()));
-		return NULL;
-	}
-	if (!identifier_is_valid(def->name)) {
-		diag_set(ClientError, ER_IDENTIFIER, def->name);
-		free(def);
 		return NULL;
 	}
 	def->type = type;
@@ -198,20 +195,40 @@ key_def_new(uint32_t space_id, uint32_t iid, const char *name,
 	def->iid = iid;
 	def->opts = *opts;
 	def->part_count = part_count;
+
+	unused_mem = (char *)def + sz;
+	/* Points after parts array, capacity name_len, initially "" */
+	def->name = unused_mem;
+	unused_mem += name_len + 1;
+	if (opts->path != NULL)
+		def->opts.path = strcpy(unused_mem, opts->path);
 	return def;
+}
+
+void
+key_def_set_name(struct key_def *def, const char *name, size_t name_len)
+{
+	assert(def->name == (char *)def +
+	       key_def_sizeof(def->part_count));
+	char *p = (char *)def->name;
+	memcpy(p, name, name_len); p[name_len] = '\0';
 }
 
 struct key_def *
 key_def_dup(const struct key_def *def)
 {
-	size_t sz = key_def_sizeof(def->part_count);
-	struct key_def *dup = (struct key_def *) malloc(sz);
-	if (dup == NULL) {
-		diag_set(OutOfMemory, sz, "malloc", "struct key_def");
-		return NULL;
+	size_t name_len = strlen(def->name);
+	struct key_def *dup = key_def_new(
+		def->space_id, def->iid, name_len, def->type,
+		&def->opts, def->part_count
+	);
+	if (dup != NULL) {
+		dup->tuple_compare = def->tuple_compare;
+		dup->tuple_compare_with_key = def->tuple_compare_with_key;
+		memcpy(dup->parts, def->parts,
+		       sizeof(def->parts[0]) * def->part_count);
+		key_def_set_name(dup, def->name, name_len);
 	}
-	memcpy(dup, def, key_def_sizeof(def->part_count));
-	rlist_create(&dup->link);
 	return dup;
 }
 
@@ -273,6 +290,9 @@ key_def_check(struct key_def *key_def)
 {
 	struct space *space = space_cache_find(key_def->space_id);
 
+	if (!identifier_is_valid(key_def->name)) {
+		tnt_raise(ClientError, ER_IDENTIFIER, key_def->name);
+	}
 	if (key_def->iid >= BOX_INDEX_MAX) {
 		tnt_raise(ClientError, ER_MODIFY_INDEX,
 			  key_def->name,
@@ -375,10 +395,12 @@ key_def_merge(const struct key_def *first, const struct key_def *second)
 	}
 
 	struct key_def *new_def;
-	new_def =  key_def_new(first->space_id, first->iid, first->name,
+	size_t name_len = strlen(first->name);
+	new_def =  key_def_new(first->space_id, first->iid, name_len,
 			       first->type, &first->opts, new_part_count);
 	if (new_def == NULL)
 		return NULL;
+	key_def_set_name(new_def, first->name, name_len);
 	/* Write position in the new key def. */
 	uint32_t pos = 0;
 	/* Append first key def's parts to the new key_def. */

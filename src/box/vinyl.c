@@ -3367,7 +3367,8 @@ vy_index_create(struct vy_index *index)
 	 */
 	xctl_tx_begin();
 	xctl_create_vy_index(key_def->opts.lsn, key_def->iid,
-			     key_def->space_id, key_def->opts.path);
+			     key_def->space_id,
+			     key_def->opts.path ? key_def->opts.path : "");
 	xctl_insert_vy_range(index->key_def->opts.lsn,
 			     range->id, NULL, NULL);
 	if (xctl_tx_commit() < 0)
@@ -5421,7 +5422,7 @@ vy_index_conf_create(struct vy_index *conf, struct key_def *key_def)
 	         key_def->space_id, key_def->iid);
 	conf->name = strdup(name);
 	/* path */
-	if (key_def->opts.path[0] == '\0') {
+	if (key_def->opts.path == NULL) {
 		char path[PATH_MAX];
 		vy_index_snprint_path(path, sizeof(path), conf->env->conf->path,
 				      key_def->space_id, key_def->iid);

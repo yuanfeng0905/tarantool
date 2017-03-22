@@ -370,8 +370,7 @@ uint32_t
 tuple_hash_slow_path(const struct tuple *tuple, const struct key_def *key_def)
 {
 	assert(key_def->part_count != 1 ||
-		       key_def->parts[1].type != FIELD_TYPE_UNSIGNED);
-
+	       key_def->parts[0].type != FIELD_TYPE_UNSIGNED);
 	uint32_t h = HASH_SEED;
 	uint32_t carry = 0;
 	uint32_t total_size = 0;
@@ -389,7 +388,7 @@ uint32_t
 key_hash_slow_path(const char *key, const struct key_def *key_def)
 {
 	assert(key_def->part_count != 1 ||
-	       key_def->parts[1].type != FIELD_TYPE_UNSIGNED);
+	       key_def->parts[0].type != FIELD_TYPE_UNSIGNED);
 
 	uint32_t h = HASH_SEED;
 	uint32_t carry = 0;

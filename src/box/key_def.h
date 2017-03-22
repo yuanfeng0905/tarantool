@@ -188,7 +188,7 @@ struct key_opts {
 	/**
 	 * Vinyl index options.
 	 */
-	char path[PATH_MAX];
+	const char *path;
 	int64_t range_size;
 	int64_t page_size;
 	/**
@@ -238,12 +238,12 @@ typedef int (*tuple_compare_t)(const struct tuple *tuple_a,
 struct key_def {
 	/* A link in key list. */
 	struct rlist link;
+	/** Index name. */
+	const char *name;
 	/** Ordinal index number in the index array. */
 	uint32_t iid;
 	/* Space id. */
 	uint32_t space_id;
-	/** Index name. */
-	char name[BOX_NAME_MAX + 1];
 	/** Index type. */
 	enum index_type type;
 	struct key_opts opts;
@@ -384,27 +384,22 @@ typedef struct box_function_ctx box_function_ctx_t;
 typedef int (*box_function_f)(box_function_ctx_t *ctx,
 	     const char *args, const char *args_end);
 
-static inline size_t
-key_def_sizeof(uint32_t part_count)
-{
-	return sizeof(struct key_def) + sizeof(struct key_part) * (part_count + 1);
-}
-
 /**
  * Allocate a new key definition.
  * @retval not NULL Success.
  * @retval NULL     Memory error.
  */
 struct key_def *
-key_def_new(uint32_t space_id, uint32_t iid, const char *name,
+key_def_new(uint32_t space_id, uint32_t iid, size_t name_len,
 	    enum index_type type, const struct key_opts *opts,
 	    uint32_t part_count);
 
 /**
- * Copy one key def into another, preserving the membership
- * in rlist. This only works for key defs with equal number of
- * parts.
+ * Set name within a key def.
+ * Assumes the key def has enough capacity to store the name.
  */
+void
+key_def_set_name(struct key_def *def, const char *name, size_t name_len);
 
 /**
  * Set a single key part in a key def.

@@ -256,14 +256,19 @@ schema_init()
 	struct key_opts opts = key_opts_default;
 	struct key_def *key_def = key_def_new(def.id,
 					      0 /* index id */,
-					      "primary", /* name */
+					      0, /* name_len */
 					      TREE /* index type */,
 					      &opts,
-					      1); /* part count */
+					      2); /* max part count */
 	if (key_def == NULL)
 		diag_raise();
+
+	key_def->name = "primary";
+	key_def->part_count = 1;
 	key_def_set_part(key_def, 0 /* part no */, 0 /* field no */,
 			 FIELD_TYPE_STRING);
+
+	key_def->space_id = def.id = BOX_SCHEMA_ID;
 	(void) sc_space_new(&def, key_def, &on_replace_schema);
 
 	/* _space - home for all spaces. */
@@ -297,20 +302,12 @@ schema_init()
 	key_def->space_id = def.id = BOX_CLUSTER_ID;
 	snprintf(def.name, sizeof(def.name), "_cluster");
 	(void) sc_space_new(&def, key_def, &on_replace_cluster);
-	key_def_delete(key_def);
 
 	/* _index - definition of indexes in all spaces */
-	def.id = BOX_INDEX_ID;
 	snprintf(def.name, sizeof(def.name), "_index");
-	key_def = key_def_new(def.id,
-			      0 /* index id */,
-			      "primary",
-			      TREE /* index type */,
-			      &opts,
-			      2); /* part count */
-	if (key_def == NULL)
-		diag_raise();
+	key_def->space_id = def.id = BOX_INDEX_ID;
 	/* space no */
+	key_def->part_count = 2;
 	key_def_set_part(key_def, 0 /* part no */, 0 /* field no */,
 			 FIELD_TYPE_UNSIGNED);
 	/* index no */

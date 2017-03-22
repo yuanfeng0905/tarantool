@@ -29,6 +29,7 @@
  * SUCH DAMAGE.
  */
 #include "alter.h"
+#include "diag.h"
 #include "schema.h"
 #include "user.h"
 #include "space.h"
@@ -462,9 +463,18 @@ key_def_new_from_tuple(struct tuple *tuple)
 	uint32_t index_id = tuple_field_u32_xc(tuple, INDEX_ID);
 	enum index_type type = STR2ENUM(index_type,
 					tuple_field_cstr_xc(tuple, INDEX_TYPE));
-	const char *name = tuple_field_cstr_xc(tuple, NAME);
+	const char *name = tuple_field_xc(tuple, NAME, MP_STR);
+	uint32_t name_len = mp_decode_strl(&name);
 	uint32_t part_count;
 	const char *parts;
+
+	if (name_len > BOX_NAME_MAX) {
+		struct space *space = space_cache_find(id);
+		tnt_raise(ClientError, ER_MODIFY_INDEX,
+			  error_abbreviate(name, name_len), space_name(space),
+			  "index name is too long");
+	}
+
 	if (is_166plus) {
 		/* 1.6.6+ _index space structure */
 		const char *opts_field = tuple_field(tuple, INDEX_OPTS);
@@ -480,10 +490,11 @@ key_def_new_from_tuple(struct tuple *tuple)
 		parts = tuple_field(tuple, INDEX_165_PARTS);
 	}
 
-	key_def = key_def_new(id, index_id, name, type, &opts, part_count);
+	key_def = key_def_new(id, index_id, name_len, type, &opts, part_count);
 	if (key_def == NULL)
 		diag_raise();
 	auto scoped_guard = make_scoped_guard([=] { key_def_delete(key_def); });
+	key_def_set_name(key_def, name, name_len);
 
 	if (is_166plus) {
 		/* 1.6.6+ */
