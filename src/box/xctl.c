@@ -61,6 +61,9 @@
 #include "xlog.h"
 #include "xrow.h"
 
+#undef say_debug
+#define say_debug say_info
+
 /** File extension of a metadata log file. */
 #define XCTL_SUFFIX			"xctl"
 
