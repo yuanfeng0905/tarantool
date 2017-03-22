@@ -1110,7 +1110,18 @@ ModifyIndex::commit(struct alter_space *alter)
 	/* Move the old index to the new place but preserve */
 	space_swap_index(alter->old_space, alter->new_space,
 			 old_key_def->iid, new_key_def->iid);
-	key_def_copy(old_key_def, new_key_def);
+	/*
+	 * Replace old_key_def in the index just moved with the
+	 * new_key_def (transfering ownership).
+	 */
+	space_set_key_def(alter->new_space, new_key_def);
+	/*
+	 * Old_key_def was owned by the index; it was destroyed by
+	 * space_set_key_def(); new_key_def is now owned by the
+	 * index.
+	 */
+	new_key_def = NULL;
+	old_key_def = NULL;
 }
 
 ModifyIndex::~ModifyIndex()

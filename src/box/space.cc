@@ -183,6 +183,12 @@ space_swap_index(struct space *lhs, struct space *rhs,
 	rhs->index_map[rhs_id] = tmp;
 }
 
+void
+space_set_key_def(struct space *space, struct key_def *key_def)
+{
+	space->index_map[key_def->iid]->setKeyDef(key_def);
+}
+
 extern "C" void
 space_run_triggers(struct space *space, bool yesno)
 {

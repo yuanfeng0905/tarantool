@@ -59,6 +59,7 @@ public:
 	MemtxTree(struct key_def *key_def);
 	virtual ~MemtxTree() override;
 
+	virtual void setKeyDef(struct key_def *def) override;
 	virtual void beginBuild() override;
 	virtual void reserve(uint32_t size_hint) override;
 	virtual void buildNext(struct tuple *tuple) override;

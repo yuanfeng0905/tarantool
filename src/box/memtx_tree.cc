@@ -356,6 +356,13 @@ MemtxTree::initIterator(struct iterator *iterator, enum iterator_type type,
 }
 
 void
+MemtxTree::setKeyDef(struct key_def *def)
+{
+	MemtxIndex::setKeyDef(def);
+	tree.arg = def;
+}
+
+void
 MemtxTree::beginBuild()
 {
 	assert(memtx_tree_size(&tree) == 0);

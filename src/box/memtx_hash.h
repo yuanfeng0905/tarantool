@@ -40,6 +40,7 @@ public:
 	MemtxHash(struct key_def *key_def);
 	virtual ~MemtxHash() override;
 
+	virtual void setKeyDef(struct key_def *def) override;
 	virtual void reserve(uint32_t size_hint) override;
 	virtual size_t size() const override;
 	virtual struct tuple *random(uint32_t rnd) const override;

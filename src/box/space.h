@@ -195,6 +195,12 @@ void
 space_swap_index(struct space *lhs, struct space *rhs,
 		 uint32_t lhs_id, uint32_t rhs_id);
 
+/**
+ * Replace key_def in the index.
+ */
+void
+space_set_key_def(struct space *space, struct key_def *key_def);
+
 /** Rebuild index map in a space after a series of swap index. */
 void
 space_fill_index_map(struct space *space);

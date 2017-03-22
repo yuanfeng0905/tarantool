@@ -187,6 +187,13 @@ Index::~Index()
 	key_def_delete(key_def);
 }
 
+void Index::setKeyDef(struct key_def *def)
+{
+	assert(key_def && key_def != def);
+	key_def_delete(key_def);
+	key_def = def;
+}
+
 size_t
 Index::size() const
 {

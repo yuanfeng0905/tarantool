@@ -404,17 +404,6 @@ key_def_new(uint32_t space_id, uint32_t iid, const char *name,
  * in rlist. This only works for key defs with equal number of
  * parts.
  */
-static inline void
-key_def_copy(struct key_def *to, const struct key_def *from)
-{
-	struct rlist save_link = to->link;
-	int part_count = (to->part_count < from->part_count ?
-			  to->part_count : from->part_count);
-	size_t size  = (sizeof(struct key_def) +
-			sizeof(struct key_part) * part_count);
-	memcpy(to, from, size);
-	to->link = save_link;
-}
 
 /**
  * Set a single key part in a key def.

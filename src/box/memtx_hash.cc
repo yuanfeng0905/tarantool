@@ -142,6 +142,13 @@ MemtxHash::~MemtxHash()
 }
 
 void
+MemtxHash::setKeyDef(struct key_def *def)
+{
+	MemtxIndex::setKeyDef(def);
+	hash_table->arg = def;
+}
+
+void
 MemtxHash::reserve(uint32_t size_hint)
 {
 	(void)size_hint;
