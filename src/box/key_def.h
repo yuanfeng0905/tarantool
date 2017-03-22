@@ -138,6 +138,7 @@ enum opt_type {
 	OPT_INT,	/* int64_t */
 	OPT_FLOAT,	/* double */
 	OPT_STR,	/* char[] */
+	OPT_STRP,	/* char* */
 	opt_type_MAX,
 };
 

@@ -229,10 +229,19 @@ opt_set(void *opts, const struct opt_def *def, const char **val)
 		store_double(opt, dval);
 		break;
 	case OPT_STR:
+	case OPT_STRP:
 		if (mp_typeof(**val) != MP_STR)
 			return -1;
 		str = mp_decode_str(val, &str_len);
-		str_len = MIN(str_len, def->len - 1);
+		if (def->type == OPT_STR) {
+			str_len = MIN(str_len, def->len - 1);
+		} else {
+			char *p = (char *)region_alloc_xc(
+				&fiber()->gc, str_len+1
+			);
+			*(char **)opt = p;
+			opt = p;
+		}
 		memcpy(opt, str, str_len);
 		opt[str_len] = '\0';
 		break;
@@ -524,6 +533,9 @@ opt_encode(char *data, char *data_end, const void *opts,
 			return data_end;
 		data = mp_encode_double(data, dval);
 		break;
+	case OPT_STRP:
+		opt = *(char **)opt;
+		/* fallthrough */
 	case OPT_STR:
 		optlen = strlen(opt);
 		if (data + mp_sizeof_str(optlen) > data_end)
