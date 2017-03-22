@@ -122,6 +122,14 @@ void
 error_vformat_msg(struct error *e, const char *format, va_list ap);
 
 /**
+ * Abbreviate a long text, not necessarily NUL-terminated.
+ * The text is truncated in an unspecified fashion and ellipsis is
+ * inserted for the missing part.
+ */
+const char *
+error_abbreviate(const char *text, size_t len);
+
+/**
  * Diagnostics Area - a container for errors
  */
 struct diag {

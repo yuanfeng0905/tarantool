@@ -75,3 +75,14 @@ error_vformat_msg(struct error *e, const char *format, va_list ap)
 	vsnprintf(e->errmsg, sizeof(e->errmsg), format, ap);
 }
 
+const char *
+error_abbreviate(const char *text, size_t len)
+{
+	const size_t max_len = DIAG_ERRMSG_MAX / 2;
+	char *p = (char *)tt_cstr(text, MIN(len, max_len));
+	if (len > max_len) {
+		assert(strlen(p) == max_len);
+		strcpy(p+max_len-3, "...");
+	}
+	return p;
+}
