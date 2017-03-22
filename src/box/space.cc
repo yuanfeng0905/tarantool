@@ -102,7 +102,9 @@ space_new(struct space_def *def, struct rlist *key_list)
 	}
 	size_t sz = sizeof(struct space) +
 		(index_count + index_id_max + 1) * sizeof(Index *);
-	struct space *space = (struct space *) calloc(1, sz);
+	struct space *space = (struct space *) calloc(1, sz +
+		strlen(def->name) + 1
+	);
 
 	if (space == NULL)
 		tnt_raise(OutOfMemory, sz, "malloc", "struct space");
@@ -118,6 +120,8 @@ space_new(struct space_def *def, struct rlist *key_list)
 	space->index_map = (Index **)((char *) space + sizeof(*space) +
 				      index_count * sizeof(Index *));
 	space->def = *def;
+	space->def.name = strcpy((char *)space + sz, def->name);
+
 	Engine *engine = engine_find(def->engine_name);
 	space->format = tuple_format_new(engine->format, key_list, 0);
 	if (space->format == NULL)

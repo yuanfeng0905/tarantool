@@ -103,7 +103,7 @@ s:drop()
 -- too long space name
 box.schema.space.create(string.rep('tweedledee', 100))
 ---
-- error: 'Failed to create space ''tweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetwee'':
+- error: 'Failed to create space ''tweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetweedledeetwe...'':
     space name is too long'
 ...
 -- too long space engine name
@@ -114,7 +114,7 @@ box.schema.space.create('tweedleedee', { engine = string.rep('too-long', 100) })
 -- space name limit
 box.schema.space.create(string.rep('t', box.schema.NAME_MAX)..'_')
 ---
-- error: 'Failed to create space ''tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt'':
+- error: 'Failed to create space ''tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt_'':
     space name is too long'
 ...
 s = box.schema.space.create(string.rep('t', box.schema.NAME_MAX - 1)..'_')
@@ -204,7 +204,7 @@ box.space['tweedledum']
 -- rename space - bad name
 s:rename(string.rep('t', box.schema.NAME_MAX * 2))
 ---
-- error: 'Can''t modify space ''tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt'':
+- error: 'Can''t modify space ''tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt'':
     space name is too long'
 ...
 s.name

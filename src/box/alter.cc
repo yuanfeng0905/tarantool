@@ -668,21 +668,47 @@ space_opts_create(struct space_opts *opts, struct tuple *tuple)
 
 /**
  * Fill space_def structure from struct tuple.
+ * Name is allocated in fiber's GC region.
  */
-void
+static void
 space_def_create_from_tuple(struct space_def *def, struct tuple *tuple,
 			    uint32_t errcode)
 {
+	char *p;
+	const char *name, *engine_name;
+	uint32_t name_len, engine_name_len;
+
 	def->id = tuple_field_u32_xc(tuple, ID);
 	def->uid = tuple_field_u32_xc(tuple, UID);
 	def->exact_field_count = tuple_field_u32_xc(tuple, FIELD_COUNT);
-	int namelen = snprintf(def->name, sizeof(def->name),
-			 "%s", tuple_field_cstr_xc(tuple, NAME));
-	int engine_namelen = snprintf(def->engine_name, sizeof(def->engine_name),
-			 "%s", tuple_field_cstr_xc(tuple, ENGINE));
+
+	name = tuple_field_xc(tuple, NAME, MP_STR);
+	name_len = mp_decode_strl(&name);
+	engine_name = tuple_field_xc(tuple, ENGINE, MP_STR);
+	engine_name_len = mp_decode_strl(&engine_name);
+
+	if (name_len > BOX_NAME_MAX) {
+		tnt_raise(ClientError, errcode,
+			  error_abbreviate(name, name_len),
+			  "space name is too long");
+	}
+
+	if (engine_name_len > BOX_ENGINE_NAME_MAX) {
+		tnt_raise(ClientError, errcode,
+			  error_abbreviate(name, name_len),
+			  "space engine name is too long");
+	}
+
+	def->name = p = (char *)region_alloc_xc(&fiber()->gc, name_len + 1);
+	memcpy(p, name, name_len);
+	p[name_len] = '\0';
+
+	assert(sizeof(def->engine_name) > engine_name_len);
+	memcpy(def->engine_name, engine_name, engine_name_len);
+	def->engine_name[engine_name_len] = '\0';
 
 	space_opts_create(&def->opts, tuple);
-	space_def_check(def, namelen, engine_namelen, errcode);
+	space_def_check(def, errcode);
 	access_check_ddl(def->uid, SC_SPACE);
 }
 

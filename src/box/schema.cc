@@ -251,7 +251,7 @@ schema_init()
 	 */
 	/* _schema - key/value space with schema description */
 	struct space_def def = {
-		BOX_SCHEMA_ID, ADMIN, 0, "_schema", "memtx", {false}
+		BOX_SCHEMA_ID, ADMIN, 0, {false}, "_schema", "memtx"
 	};
 	struct key_opts opts = key_opts_default;
 	struct key_def *key_def = key_def_new(def.id,
@@ -272,8 +272,8 @@ schema_init()
 	(void) sc_space_new(&def, key_def, &on_replace_schema);
 
 	/* _space - home for all spaces. */
+	def.name = "_space";
 	key_def->space_id = def.id = BOX_SPACE_ID;
-	snprintf(def.name, sizeof(def.name), "_space");
 	key_def_set_part(key_def, 0 /* part no */, 0 /* field no */,
 			 FIELD_TYPE_UNSIGNED);
 
@@ -281,30 +281,30 @@ schema_init()
 
 	/* _user - all existing users */
 	key_def->space_id = def.id = BOX_USER_ID;
-	snprintf(def.name, sizeof(def.name), "_user");
+	def.name = "_user";
 	(void) sc_space_new(&def, key_def, &on_replace_user);
 
 	/* _func - all executable objects on which one can have grants */
 	key_def->space_id = def.id = BOX_FUNC_ID;
-	snprintf(def.name, sizeof(def.name), "_func");
+	def.name = "_func";
 	(void) sc_space_new(&def, key_def, &on_replace_func);
 	/*
 	 * _priv - association user <-> object
 	 * The real index is defined in the snapshot.
 	 */
 	key_def->space_id = def.id = BOX_PRIV_ID;
-	snprintf(def.name, sizeof(def.name), "_priv");
+	def.name = "_priv";
 	(void) sc_space_new(&def, key_def, &on_replace_priv);
 	/*
 	 * _cluster - association instance uuid <-> instance id
 	 * The real index is defined in the snapshot.
 	 */
 	key_def->space_id = def.id = BOX_CLUSTER_ID;
-	snprintf(def.name, sizeof(def.name), "_cluster");
+	def.name = "_cluster";
 	(void) sc_space_new(&def, key_def, &on_replace_cluster);
 
 	/* _index - definition of indexes in all spaces */
-	snprintf(def.name, sizeof(def.name), "_index");
+	def.name = "_index";
 	key_def->space_id = def.id = BOX_INDEX_ID;
 	/* space no */
 	key_def->part_count = 2;

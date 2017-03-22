@@ -51,6 +51,7 @@ enum {
 	BOX_FUNCTION_MAX = 32000,
 	BOX_INDEX_MAX = 128,
 	BOX_NAME_MAX = 64,
+	BOX_ENGINE_NAME_MAX = 7,
 	BOX_FIELD_MAX = INT32_MAX,
 	BOX_USER_MAX = 32,
 	/**
@@ -372,9 +373,9 @@ struct space_def {
 	 * must have exactly this many fields.
 	 */
 	uint32_t exact_field_count;
-	char name[BOX_NAME_MAX + 1];
-	char engine_name[BOX_NAME_MAX + 1];
 	struct space_opts opts;
+	const char *name;
+	char engine_name[BOX_ENGINE_NAME_MAX + 1];
 };
 
 /**
@@ -536,9 +537,7 @@ key_def_check(struct key_def *key_def);
 
 /** Check space definition structure for errors. */
 void
-space_def_check(struct space_def *def, uint32_t namelen,
-                uint32_t engine_namelen,
-                int32_t errcode);
+space_def_check(struct space_def *def, int32_t errcode);
 
 /**
  * Given a tuple with an index definition, update the LSN stored
