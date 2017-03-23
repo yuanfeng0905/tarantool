@@ -2890,12 +2890,13 @@ vy_range_rotate_mem(struct vy_range *range)
 			 index->upsert_format);
 	if (mem == NULL)
 		return -1;
-	if (range->mem->used > 0)
+	if (range->mem->used > 0) {
 		vy_range_freeze_mem(range);
-	else
+	} else {
 		vy_mem_delete(range->mem);
+		range->version++;
+	}
 	range->mem = mem;
-	range->version++;
 	return 0;
 }
 
