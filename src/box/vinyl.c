@@ -1379,6 +1379,11 @@ vy_run_new(int64_t id)
 static void
 vy_run_delete(struct vy_run *run)
 {
+	/*
+	 * Reference counter can be 1, if the delete() is called
+	 * right after the creation.
+	 */
+	assert(run->refs == 0);
 	if (run->fd >= 0 && close(run->fd) < 0)
 		say_syserror("close failed");
 	if (run->info.page_infos != NULL) {
@@ -1567,7 +1572,7 @@ vy_run_prepare_new(int64_t lsn)
 	xctl_tx_begin();
 	xctl_prepare_vy_run(lsn, run->id);
 	if (xctl_tx_commit() < 0) {
-		vy_run_delete(run);
+		vy_run_unref(run);
 		return NULL;
 	}
 	return run;
@@ -1592,7 +1597,7 @@ static void
 vy_run_discard(struct vy_run *run)
 {
 	int64_t run_id = run->id;
-	vy_run_delete(run);
+	vy_run_unref(run);
 
 	ERROR_INJECT(ERRINJ_VY_RUN_DISCARD,
 		     {say_error("error injection: run %lld not discarded",
@@ -2917,7 +2922,7 @@ vy_range_delete(struct vy_range *range)
 
 	/* Delete all runs. */
 	if (range->new_run != NULL)
-		vy_run_delete(range->new_run);
+		vy_run_unref(range->new_run);
 	while (!rlist_empty(&range->runs)) {
 		struct vy_run *run = rlist_shift_entry(&range->runs,
 						       struct vy_run, in_range);
@@ -3467,7 +3472,7 @@ vy_index_recovery_cb(const struct xctl_record *record, void *cb_arg)
 		if (run == NULL)
 			return -1;
 		if (vy_run_recover(run, index->path) != 0) {
-			vy_run_delete(run);
+			vy_run_unref(run);
 			return -1;
 		}
 		vy_range_add_run(range, run);
@@ -4676,6 +4681,8 @@ static void
 vy_scheduler_add_range(struct vy_scheduler *scheduler,
 		       struct vy_range *range)
 {
+	assert(range->in_dump.pos == UINT32_MAX);
+	assert(range->in_compact.pos == UINT32_MAX);
 	vy_dump_heap_insert(&scheduler->dump_heap, &range->in_dump);
 	vy_compact_heap_insert(&scheduler->compact_heap, &range->in_compact);
 	assert(range->in_dump.pos != UINT32_MAX);
@@ -10166,7 +10173,7 @@ out_free_page:
 	rc = 0; /* success */
 
 out_free_run:
-	vy_run_delete(run);
+	vy_run_unref(run);
 out:
 	return rc;
 }
