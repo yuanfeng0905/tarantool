@@ -452,6 +452,8 @@ struct vy_range {
 	size_t used;
 	/** Minimal in-memory lsn (min over mem->min_lsn). */
 	int64_t min_lsn;
+	/** Maximal LSN over all runs. */
+	int64_t max_disk_lsn;
 	/** New run created for dump/compaction. */
 	struct vy_run *new_run;
 	/**
@@ -1551,6 +1553,7 @@ vy_range_add_run(struct vy_range *range, struct vy_run *run)
 	rlist_add_entry(&range->runs, run, in_range);
 	range->run_count++;
 	range->size += vy_run_size(run);
+	range->max_disk_lsn = MAX(range->max_disk_lsn, run->info.max_lsn);
 }
 
 /** Remove a run from a range's list. */
@@ -3313,6 +3316,8 @@ vy_range_maybe_coalesce(struct vy_range **p_range)
 		result->used += it->used;
 		if (result->min_lsn > it->min_lsn)
 			result->min_lsn = it->min_lsn;
+		if (result->max_disk_lsn < it->max_disk_lsn)
+			result->max_disk_lsn = it->max_disk_lsn;
 		vy_range_delete(it);
 		it = next;
 	}
