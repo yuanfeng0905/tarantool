@@ -92,6 +92,14 @@ replication_init(void);
 void
 replication_free(void);
 
+/** Instance id vclock identifier */
+extern uint32_t instance_id;
+/**
+ * tx-thread local vclock reflecting the
+ * state of the cluster, as maintained by the appliers.
+ */
+extern struct vclock replicaset_vclock;
+
 /** UUID of the instance. */
 extern struct tt_uuid INSTANCE_UUID;
 /** UUID of the replica set. */
@@ -115,12 +123,6 @@ enum {
 	 */
 	REPLICA_ID_NIL = 0,
 };
-
-static inline bool
-replica_id_is_reserved(uint32_t id)
-{
-        return id == REPLICA_ID_NIL;
-}
 
 /**
  * Find a replica by UUID
@@ -169,6 +171,9 @@ replica_clear_relay(struct replica *replica);
 
 #if defined(__cplusplus)
 } /* extern "C" */
+
+void
+replica_check_id(uint32_t replica_id);
 
 /**
  * Register the universally unique identifier of a remote replica and

@@ -38,6 +38,8 @@
 #include "schema.h"
 #include "small/rlist.h"
 #include "scoped_guard.h"
+#include "xctl.h"
+#include "vclock.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errinj.h>
@@ -115,6 +117,13 @@ Engine::beginCheckpoint()
 }
 
 int
+Engine::prepareWaitCheckpoint(struct vclock *vclock)
+{
+	(void) vclock;
+	return 0;
+}
+
+int
 Engine::waitCheckpoint(struct vclock *vclock)
 {
 	(void) vclock;
@@ -130,6 +139,12 @@ Engine::commitCheckpoint(struct vclock *vclock)
 void
 Engine::abortCheckpoint()
 {
+}
+
+void
+Engine::collectGarbage(int64_t lsn)
+{
+	(void) lsn;
 }
 
 void
@@ -314,11 +329,18 @@ int
 engine_commit_checkpoint(struct vclock *vclock)
 {
 	Engine *engine;
+	/* prepare to wait */
+	engine_foreach(engine) {
+		if (engine->prepareWaitCheckpoint(vclock) < 0)
+			return -1;
+	}
 	/* wait for engine snapshot completion */
 	engine_foreach(engine) {
 		if (engine->waitCheckpoint(vclock) < 0)
 			return -1;
 	}
+	if (xctl_rotate(vclock) != 0)
+		return -1;
 	/* remove previous snapshot reference */
 	engine_foreach(engine) {
 		engine->commitCheckpoint(vclock);
@@ -333,6 +355,14 @@ engine_abort_checkpoint()
 	/* rollback snapshot creation */
 	engine_foreach(engine)
 		engine->abortCheckpoint();
+}
+
+void
+engine_collect_garbage(int64_t lsn)
+{
+	Engine *engine;
+	engine_foreach(engine)
+		engine->collectGarbage(lsn);
 }
 
 void

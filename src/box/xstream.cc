@@ -1,5 +1,3 @@
-#ifndef TARANTOOL_REPLICATION_RELAY_H_INCLUDED
-#define TARANTOOL_REPLICATION_RELAY_H_INCLUDED
 /*
  * Copyright 2010-2016, Tarantool AUTHORS, please see AUTHORS file.
  *
@@ -16,7 +14,7 @@
  *    disclaimer in the documentation and/or other materials
  *    provided with the distribution.
  *
- * THIS SOFTWARE IS PROVIDED BY <COPYRIGHT HOLDER> ``AS IS'' AND
+ * THIS SOFTWARE IS PROVIDED BY AUTHORS ``AS IS'' AND
  * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
  * TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
  * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -30,55 +28,17 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
-#include "evio.h"
-#include "fiber.h"
-#include "vclock.h"
+
 #include "xstream.h"
+#include "exception.h"
 
-struct replica;
-struct tt_uuid;
-
-/** State of a replication relay. */
-struct relay {
-	/** The thread in which we relay data to the replica. */
-	struct cord cord;
-	/** Replica connection */
-	struct ev_io io;
-	/* Request sync */
-	uint64_t sync;
-	struct recovery *r;
-	struct xstream stream;
-	struct vclock stop_vclock;
-	ev_tstamp wal_dir_rescan_delay;
-	uint32_t replica_id;
-};
-
-/**
- * Send initial JOIN rows to the replica
- *
- * @param fd        client connection
- * @param sync      sync from incoming JOIN request
- */
-void
-relay_initial_join(int fd, uint64_t sync);
-
-/**
- * Send final JOIN rows to the replica.
- *
- * @param fd        client connection
- * @param sync      sync from incoming JOIN request
- */
-void
-relay_final_join(int fd, uint64_t sync, struct vclock *start_vclock,
-	         struct vclock *stop_vclock);
-
-/**
- * Subscribe a replica to updates.
- *
- * @return none.
- */
-void
-relay_subscribe(int fd, uint64_t sync, struct replica *replica,
-		struct vclock *replica_vclock);
-
-#endif /* TARANTOOL_REPLICATION_RELAY_H_INCLUDED */
+int
+xstream_write(struct xstream *stream, struct xrow_header *row)
+{
+	try {
+		stream->write(stream, row);
+	} catch (Exception *e) {
+		return -1;
+	}
+	return 0;
+}

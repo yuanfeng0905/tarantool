@@ -41,7 +41,6 @@
 #include <lualib.h>
 
 #include "box/applier.h"
-#include "box/recovery.h"
 #include "box/wal.h"
 #include "box/replication.h"
 #include "main.h"
@@ -85,10 +84,6 @@ lbox_pushreplica(lua_State *L, struct replica *replica)
 
 	lua_pushstring(L, "status");
 	lua_pushstring(L, status);
-	lua_settable(L, -3);
-
-	lua_pushstring(L, "vclock");
-	lbox_pushvclock(L, &applier->vclock);
 	lua_settable(L, -3);
 
 	if (applier->reader) {
@@ -136,18 +131,23 @@ lbox_info_replication(struct lua_State *L)
 static int
 lbox_info_server(struct lua_State *L)
 {
+	/*
+	 * Self can be NULL during bootstrap: entire box.info
+	 * bundle becomes available soon after entering box.cfg{}
+	 * and replication bootstrap relies on this as it looks
+	 * at box.info.status.
+	 */
+	struct replica *self = replica_by_uuid(&INSTANCE_UUID);
 	lua_createtable(L, 0, 2);
 	lua_pushliteral(L, "id");
-	lua_pushinteger(L, recovery->replica_id);
+	lua_pushinteger(L, self ? self->id : REPLICA_ID_NIL);
 	lua_settable(L, -3);
 	lua_pushliteral(L, "uuid");
 	lua_pushlstring(L, tt_uuid_str(&INSTANCE_UUID), UUID_STR_LEN);
 	lua_settable(L, -3);
 	lua_pushliteral(L, "lsn");
-	if (recovery->replica_id != REPLICA_ID_NIL && wal != NULL) {
-		struct vclock vclock;
-		wal_checkpoint(&vclock, false);
-		luaL_pushint64(L, vclock_get(&vclock, recovery->replica_id));
+	if (self != NULL) {
+		luaL_pushint64(L, vclock_get(&replicaset_vclock, self->id));
 	} else {
 		luaL_pushint64(L, -1);
 	}
@@ -162,13 +162,7 @@ lbox_info_server(struct lua_State *L)
 static int
 lbox_info_vclock(struct lua_State *L)
 {
-	struct vclock vclock;
-	if (wal != NULL) {
-		wal_checkpoint(&vclock, false);
-	} else {
-		vclock_create(&vclock);
-	}
-	lbox_pushvclock(L, &vclock);
+	lbox_pushvclock(L, &replicaset_vclock);
 	return 1;
 }
 
@@ -201,7 +195,7 @@ lbox_info_cluster(struct lua_State *L)
 	lua_pushlstring(L, tt_uuid_str(&REPLICASET_UUID), UUID_STR_LEN);
 	lua_settable(L, -3);
 	lua_pushliteral(L, "signature");
-	luaL_pushint64(L, vclock_sum(&recovery->vclock));
+	luaL_pushint64(L, vclock_sum(&replicaset_vclock));
 	lua_settable(L, -3);
 
 	return 1;

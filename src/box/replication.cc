@@ -37,11 +37,12 @@
 #include <small/mempool.h>
 
 #include "box.h"
-#include "recovery.h"
 #include "applier.h"
 #include "error.h"
 #include "vclock.h" /* VCLOCK_MAX */
 
+struct vclock replicaset_vclock;
+uint32_t instance_id = REPLICA_ID_NIL;
 /**
  * Globally unique identifier of this replica set.
  * A replica set is a set of appliers and their matching
@@ -75,12 +76,27 @@ replication_init(void)
 	mempool_create(&replica_pool, &cord()->slabc,
 		       sizeof(struct replica));
 	replicaset_new(&replicaset);
+	vclock_create(&replicaset_vclock);
 }
 
 void
 replication_free(void)
 {
 	mempool_destroy(&replica_pool);
+}
+
+void
+replica_check_id(uint32_t replica_id)
+{
+        if (replica_id == REPLICA_ID_NIL)
+		tnt_raise(ClientError, ER_REPLICA_ID_IS_RESERVED,
+			  (unsigned) replica_id);
+	if (replica_id >= VCLOCK_MAX)
+		tnt_raise(LoggedError, ER_REPLICA_MAX,
+			  (unsigned) replica_id);
+        if (replica_id == ::instance_id)
+		tnt_raise(ClientError, ER_LOCAL_INSTANCE_ID_IS_READ_ONLY,
+			  (unsigned) replica_id);
 }
 
 /* Return true if replica doesn't have id, relay and applier */
@@ -116,7 +132,7 @@ struct replica *
 replicaset_add(uint32_t replica_id, const struct tt_uuid *replica_uuid)
 {
 	assert(!tt_uuid_is_nil(replica_uuid));
-	assert(!replica_id_is_reserved(replica_id) && replica_id < VCLOCK_MAX);
+	assert(replica_id != REPLICA_ID_NIL && replica_id < VCLOCK_MAX);
 
 	assert(replica_by_uuid(replica_uuid) == NULL);
 	struct replica *replica = replica_new(replica_uuid);
@@ -132,22 +148,17 @@ replica_set_id(struct replica *replica, uint32_t replica_id)
 	assert(replica->id == REPLICA_ID_NIL); /* replica id is read-only */
 	replica->id = replica_id;
 
-	/* Add replica */
-	struct recovery *r = ::recovery;
-
 	if (tt_uuid_is_equal(&INSTANCE_UUID, &replica->uuid)) {
 		/* Assign local replica id */
-		assert(r->replica_id == REPLICA_ID_NIL);
-		r->replica_id = replica_id;
+		assert(instance_id == REPLICA_ID_NIL);
+		instance_id = replica_id;
 	}
 }
 
 void
 replica_clear_id(struct replica *replica)
 {
-	assert(replica->id != REPLICA_ID_NIL);
-
-	struct recovery *r = ::recovery;
+	assert(replica->id != REPLICA_ID_NIL && replica->id != instance_id);
 	/*
 	 * Don't remove replicas from vclock here.
 	 * The vclock_sum() must always grow, it is a core invariant of
@@ -157,8 +168,6 @@ replica_clear_id(struct replica *replica)
 	 * Some records may arrive later on due to asynchronous nature of
 	 * replication.
 	 */
-	if (r->replica_id == replica->id)
-		r->replica_id = REPLICA_ID_NIL;
 	replica->id = REPLICA_ID_NIL;
 	if (replica_is_orphan(replica)) {
 		replicaset_remove(&replicaset, replica);
@@ -237,7 +246,7 @@ replicaset_update(struct applier **appliers, int count)
 void
 replica_set_relay(struct replica *replica, struct relay *relay)
 {
-	assert(!replica_id_is_reserved(replica->id));
+	assert(replica->id != REPLICA_ID_NIL);
 	assert(replica->relay == NULL);
 	replica->relay = relay;
 }

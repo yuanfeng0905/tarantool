@@ -35,6 +35,7 @@ local default_cfg = {
     too_long_threshold  = 0.5,
     wal_mode            = "write",
     rows_per_wal        = 500000,
+    wal_max_size        = 1024 * 1024 * 1024 * 256,
     wal_dir_rescan_delay= 2,
     force_recovery      = false,
     replication         = nil,
@@ -81,6 +82,7 @@ local template_cfg = {
     too_long_threshold  = 'number',
     wal_mode            = 'string',
     rows_per_wal        = 'number',
+    wal_max_size        = 'number',
     wal_dir_rescan_delay= 'number',
     force_recovery      = 'boolean',
     replication         = 'string, number, table',
@@ -111,6 +113,13 @@ local modify_cfg = {
 local function purge_login_frourilib(uri)
     if uri == nil then
         return nil
+    end
+    if type(uri) == 'table' then
+    local new_table = {}
+        for k, v in pairs(uri) do
+            new_table[k] = urilib.format(urilib.parse(v), false)
+        end
+        return new_table
     end
     return urilib.format(urilib.parse(uri), false)
 end
@@ -159,7 +168,7 @@ local translate_cfg = {
     snapshot_count = {'checkpoint_count'},
     snapshot_period = {'checkpoint_interval'},
     slab_alloc_arena = {'memtx_memory', convert_gb},
-    slab_alloc_min = {'memtx_min_tuple_size'},
+    slab_alloc_minimal = {'memtx_min_tuple_size'},
     slab_alloc_maximal = {'memtx_max_tuple_size'},
     snap_dir = {'memtx_dir'},
     logger = {'log'},
@@ -171,6 +180,9 @@ local translate_cfg = {
 
 -- Upgrade old config
 local function upgrade_cfg(cfg, translate_cfg)
+    if cfg == nil then
+        return {}
+    end
     local result_cfg = {}
     for k, v in pairs(cfg) do
         local translation = translate_cfg[k]

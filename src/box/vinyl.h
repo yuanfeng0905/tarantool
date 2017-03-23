@@ -50,6 +50,8 @@ struct vclock;
 struct request;
 struct space;
 struct txn_stmt;
+struct xrow_header;
+struct xstream;
 enum iterator_type;
 
 /*
@@ -79,10 +81,13 @@ int
 vy_end_recovery(struct vy_env *e);
 
 int
-vy_checkpoint(struct vy_env *env);
+vy_checkpoint(struct vy_env *env, struct vclock *vclock);
 
 int
-vy_wait_checkpoint(struct vy_env *env, struct vclock *vlock);
+vy_wait_checkpoint(struct vy_env *env);
+
+void
+vy_end_checkpoint(struct vy_env *env);
 
 /*
  * Introspection
@@ -293,10 +298,8 @@ vy_cursor_next(struct vy_cursor *cursor, struct tuple **result);
  * Replication
  */
 
-typedef int
-(*vy_send_row_f)(void *, const char *tuple, uint32_t tuple_size, int64_t lsn);
 int
-vy_index_send(struct vy_index *index, vy_send_row_f sendrow, void *ctx);
+vy_join(struct vy_env *env, struct xstream *stream);
 
 #ifdef __cplusplus
 }

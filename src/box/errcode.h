@@ -114,7 +114,7 @@ struct errcode_record {
 	/* 59 */_(ER_CFG,			"Incorrect value for option '%s': %s") \
 	/* 60 */_(ER_VINYL,			"%s") \
 	/* 61 */_(ER_UNUSED ,			"") \
-	/* 62 */_(ER_UNKNOWN_REPLICA,		"Replica %s is not registered with replica set %u") \
+	/* 62 */_(ER_UNKNOWN_REPLICA,		"Replica %s is not registered with replica set %s") \
 	/* 63 */_(ER_REPLICASET_UUID_MISMATCH,	"Replica set UUID of the replica %s doesn't match replica set UUID of the master %s") \
 	/* 64 */_(ER_INVALID_UUID,		"Invalid UUID: %s") \
 	/* 65 */_(ER_REPLICASET_UUID_IS_RO,	"Can't reset replica set UUID: it is already assigned") \
@@ -166,7 +166,7 @@ struct errcode_record {
 	/*111 */_(ER_WRONG_SPACE_OPTIONS,	"Wrong space options (field %u): %s") \
 	/*112 */_(ER_UNSUPPORTED_INDEX_FEATURE,	"Index '%s' (%s) of space '%s' (%s) does not support %s") \
 	/*113 */_(ER_VIEW_IS_RO,		"View '%s' is read-only") \
-	/*114 */_(ER_REPLICA_ID_MISMATCH,	"Replica id mismatch: expected %s, got %s") \
+	/*114 */_(ER_UNUSED1,			"") \
 	/*115 */_(ER_SYSTEM,			"%s") \
 	/*116 */_(ER_LOADING,			"Instance bootstrap hasn't finished yet") \
 	/*117 */_(ER_CONNECTION_TO_SELF,	"Connection to self") \
@@ -179,7 +179,8 @@ struct errcode_record {
 	/*124 */_(ER_DECOMPRESSION,		"Decompression error: %s") \
 	/*125 */_(ER_INVALID_XLOG_TYPE,		"Invalid xlog type: expected %s, got %s") \
 	/*126 */_(ER_ALREADY_RUNNING,		"Failed to lock WAL directory %s and hot_standby mode is off") \
-	/*127 */_(ER_INDEX_FIELD_COUNT_LIMIT,	"Indexed field count limit reached: %d indexed fields")
+	/*127 */_(ER_INDEX_FIELD_COUNT_LIMIT,	"Indexed field count limit reached: %d indexed fields") \
+	/*128 */_(ER_LOCAL_INSTANCE_ID_IS_READ_ONLY, "The local instance id %u is read-only") \
 
 /*
  * !IMPORTANT! Please follow instructions at start of the file

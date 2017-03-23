@@ -25,7 +25,7 @@ local function runtests()
 end
 
 -- cleanup
-os.execute("rm -f *.snap *.xlog*")
+os.execute("rm -f *.snap *.xlog *.xctl")
 
 -- configuring tarantool
 box.cfg {

@@ -88,6 +88,7 @@ memtx_replace_build_next(struct txn_stmt *stmt, struct space *space,
 	}
 	((MemtxIndex *) space->index[0])->buildNext(stmt->new_tuple);
 	stmt->engine_savepoint = stmt;
+	space_bsize_update(space, NULL, stmt->new_tuple);
 }
 
 /**
@@ -101,6 +102,7 @@ memtx_replace_primary_key(struct txn_stmt *stmt, struct space *space,
 	stmt->old_tuple = space->index[0]->replace(stmt->old_tuple,
 						   stmt->new_tuple, mode);
 	stmt->engine_savepoint = stmt;
+	space_bsize_update(space, stmt->old_tuple, stmt->new_tuple);
 }
 
 /**
@@ -228,6 +230,7 @@ memtx_replace_all_keys(struct txn_stmt *stmt, struct space *space,
 	}
 	stmt->old_tuple = old_tuple;
 	stmt->engine_savepoint = stmt;
+	space_bsize_update(space, old_tuple, new_tuple);
 }
 
 
@@ -246,7 +249,10 @@ dup_replace_mode(uint32_t op)
 void
 MemtxSpace::applyInitialJoinRow(struct space *space, struct request *request)
 {
-	assert(request->type == IPROTO_INSERT);
+	if (request->type != IPROTO_INSERT) {
+		tnt_raise(ClientError, ER_UNKNOWN_REQUEST_TYPE,
+				(uint32_t) request->type);
+	}
 	request->header->replica_id = 0;
 	struct txn *txn = txn_begin_stmt(space);
 	try {
@@ -326,7 +332,7 @@ MemtxSpace::prepareUpsert(struct txn_stmt *stmt, struct space *space,
 	if (tuple_validate_raw(space->format, request->tuple))
 		diag_raise();
 
-	Index *index = index_find_unique(space, request->index_id);
+	Index *index = space->index[0];
 
 	struct key_def *key_def = index->key_def;
 	uint32_t part_count = index->key_def->part_count;

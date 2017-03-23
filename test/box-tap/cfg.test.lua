@@ -4,7 +4,7 @@ local tap = require('tap')
 local test = tap.test('cfg')
 local socket = require('socket')
 local fio = require('fio')
-test:plan(61)
+test:plan(62)
 
 --------------------------------------------------------------------------------
 -- Invalid values
@@ -252,7 +252,7 @@ test:is(run_script(code), 0, "vinyl_threads = 2")
 
 -- test memtx options upgrade
 code = [[
-box.cfg{slab_alloc_arena = 0.2, slab_alloc_min = 16,
+box.cfg{slab_alloc_arena = 0.2, slab_alloc_minimal = 16,
     slab_alloc_maximal = 64 * 1024}
 os.exit(box.cfg.memtx_memory == 214748364 
     and box.cfg.memtx_min_tuple_size == 16
@@ -262,7 +262,7 @@ and 0 or 1)
 test:is(run_script(code), 0, "upgrade memtx memory options")
 
 code = [[
-box.cfg{slab_alloc_arena = 0.2, slab_alloc_min = 16, slab_alloc_maximal = 64 * 1024,
+box.cfg{slab_alloc_arena = 0.2, slab_alloc_minimal = 16, slab_alloc_maximal = 64 * 1024,
     memtx_memory = 214748364, memtx_min_tuple_size = 16,
     memtx_max_tuple_size = 64 * 1024}
 os.exit(0)
@@ -270,7 +270,7 @@ os.exit(0)
 test:is(run_script(code), 0, "equal new and old memtx options")
 
 code = [[
-box.cfg{slab_alloc_arena = 0.2, slab_alloc_min = 16, slab_alloc_maximal = 64 * 1024,
+box.cfg{slab_alloc_arena = 0.2, slab_alloc_minimal = 16, slab_alloc_maximal = 64 * 1024,
     memtx_memory = 107374182, memtx_min_tuple_size = 16,
     memtx_max_tuple_size = 64 * 1024}
 os.exit(0)
@@ -278,7 +278,7 @@ os.exit(0)
 test:is(run_script(code), PANIC, "different new and old memtx_memory")
 
 code = [[
-box.cfg{slab_alloc_arena = 0.2, slab_alloc_min = 16, slab_alloc_maximal = 64 * 1024,
+box.cfg{slab_alloc_arena = 0.2, slab_alloc_minimal = 16, slab_alloc_maximal = 64 * 1024,
     memtx_memory = 214748364, memtx_min_tuple_size = 32,
     memtx_max_tuple_size = 64 * 1024}
 os.exit(0)
@@ -317,6 +317,24 @@ os.exit(box.cfg.checkpoint_interval == 150
       and box.cfg.checkpoint_count == 8 and 0 or 1)
 ]]
 test:is(run_script(code), 0, "update checkpoint params")
+
+--
+--  test wal_max_size option
+--
+code = [[
+digest = require'digest'
+fio = require'fio'
+box.cfg{wal_max_size = 1024}
+_ = box.schema.space.create('test'):create_index('pk')
+data = digest.urandom(1024)
+cnt1 = #fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog'))
+for i = 0, 9 do
+  box.space.test:replace({1, data})
+end
+cnt2 = #fio.glob(fio.pathjoin(box.cfg.wal_dir, '*.xlog'))
+os.exit(cnt1 < cnt2 - 8 and 0 or 1)
+]]
+test:is(run_script(code), 0, "wal_max_size xlog rotation")
 
 test:check()
 os.exit(0)

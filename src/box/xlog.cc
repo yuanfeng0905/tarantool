@@ -301,17 +301,28 @@ xdir_create(struct xdir *dir, const char *dirname,
 	dir->instance_uuid = instance_uuid;
 	snprintf(dir->dirname, PATH_MAX, "%s", dirname);
 	dir->open_wflags = O_RDWR | O_CREAT | O_EXCL;
-	if (type == SNAP) {
+	switch (type) {
+	case SNAP:
 		dir->filetype = "SNAP";
 		dir->filename_ext = ".snap";
 		dir->suffix = INPROGRESS;
 		dir->sync_interval = SNAP_SYNC_INTERVAL;
-	} else {
+		break;
+	case XLOG:
 		dir->sync_is_async = true;
 		dir->filetype = "XLOG";
 		dir->filename_ext = ".xlog";
 		dir->suffix = NONE;
 		dir->force_recovery = true;
+		break;
+	case XCTL:
+		dir->filetype = "XCTL";
+		dir->filename_ext = ".xctl";
+		dir->suffix = INPROGRESS;
+		dir->force_recovery = true;
+		break;
+	default:
+		unreachable();
 	}
 	dir->type = type;
 }
@@ -612,6 +623,25 @@ xdir_format_filename(struct xdir *dir, int64_t signature,
 		 dir->dirname, (long long) signature,
 		 dir->filename_ext, suffix_str);
 	return filename;
+}
+
+void
+xdir_collect_garbage(struct xdir *dir, int64_t signature)
+{
+	struct vclock *it = vclockset_first(&dir->index);
+	while (it != NULL && vclock_sum(it) < signature) {
+		struct vclock *next = vclockset_next(&dir->index, it);
+		char *filename = xdir_format_filename(dir, vclock_sum(it),
+						      NONE);
+		say_info("removing %s", filename);
+		if (unlink(filename) < 0 && errno != ENOENT) {
+			say_syserror("error while removing %s", filename);
+		} else {
+			vclockset_remove(&dir->index, it);
+			free(it);
+		}
+		it = next;
+	}
 }
 
 /* }}} */

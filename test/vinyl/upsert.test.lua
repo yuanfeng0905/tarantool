@@ -187,3 +187,86 @@ gen()
 check() -- exploded before #1829
 
 space:drop()
+
+
+-- test upsert statistic against some upsert scenarous
+
+test_run:cmd("setopt delimiter ';'")
+function upsert_stat_diff(stat2, stat1)
+    return {
+        squashed = stat2.upsert_squashed.total - stat1.upsert_squashed.total,
+        applied = stat2.upsert_applied.total - stat1.upsert_applied.total
+    }
+end;
+test_run:cmd("setopt delimiter ''");
+
+stat1 = box.info.vinyl().performance
+
+space = box.schema.space.create('test', { engine = 'vinyl' })
+index = space:create_index('primary')
+
+-- separate upserts w/o on disk data
+space:upsert({1, 1, 1}, {{'+', 2, 10}})
+space:upsert({1, 1, 1}, {{'-', 2, 20}})
+space:upsert({1, 1, 1}, {{'=', 2, 20}})
+
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+-- in-tx upserts
+box.begin()
+space:upsert({2, 1, 1}, {{'+', 2, 10}})
+space:upsert({2, 1, 1}, {{'-', 2, 20}})
+space:upsert({2, 1, 1}, {{'=', 2, 20}})
+box.commit()
+
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+box.snapshot()
+
+-- upsert with on disk data
+space:upsert({1, 1, 1}, {{'+', 2, 10}})
+space:upsert({1, 1, 1}, {{'-', 2, 20}})
+
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+-- count of applied apserts
+space:get({1})
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+space:get({2})
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+space:select({})
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+-- start upsert optimizer
+for i = 0, 999 do space:upsert({3, 0, 0}, {{'+', 2, 1}}) end
+stat2 = box.info.vinyl().performance
+upsert_stat_diff(stat2, stat1)
+stat1 = stat2
+
+space:drop()
+
+-- fix behaviour after https://github.com/tarantool/tarantool/issues/2104
+s = box.schema.space.create('test', {engine = 'vinyl'})
+i = s:create_index('test')
+
+s:replace({1, 1})
+box.snapshot()
+s:upsert({1, 1}, {{'+', 1, 1}})
+s:upsert({1, 1}, {{'+', 2, 1}})
+s:select() --both upserts are ignored due to primary key change
+
+s:drop()

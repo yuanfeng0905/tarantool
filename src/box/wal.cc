@@ -37,6 +37,7 @@
 
 #include "xlog.h"
 #include "xrow.h"
+#include "xctl.h"
 #include "cbus.h"
 #include "coeio.h"
 
@@ -74,7 +75,9 @@ struct wal_writer
 	struct stailq rollback;
 	/* ----------------- wal ------------------- */
 	/** A setting from instance configuration - rows_per_wal */
-	int64_t rows_per_wal;
+	int64_t wal_max_rows;
+	/** A setting from instance configuration - wal_max_size */
+	int64_t wal_max_size;
 	/** Another one - wal_mode */
 	enum wal_mode wal_mode;
 	/** wal_dir, from the configuration file. */
@@ -121,11 +124,21 @@ struct wal_msg: public cmsg {
 	struct stailq rollback;
 };
 
+/**
+ * Metadata log writer.
+ */
+struct xctl_writer {
+	/** The metadata log file. */
+	struct xlog xlog;
+	/** Set if the xlog is open. */
+	bool is_active;
+};
+static struct xctl_writer xctl_writer;
+
 static struct wal_thread wal_thread;
 static struct wal_writer wal_writer_singleton;
 
 struct wal_writer *wal = NULL;
-struct rmean *rmean_tx_wal_bus;
 
 static void
 wal_write_to_disk(struct cmsg *msg);
@@ -150,6 +163,43 @@ static struct wal_msg *
 wal_msg(struct cmsg *msg)
 {
 	return msg->route == wal_request_route ? (struct wal_msg *) msg : NULL;
+}
+
+struct wal_request *
+wal_request_new(size_t n_rows)
+{
+	struct wal_request *req;
+	req = (struct wal_request *)region_aligned_alloc_xc(
+		&fiber()->gc,
+		sizeof(struct wal_request) +
+		         sizeof(req->rows[0]) * n_rows,
+		alignof(struct wal_request));
+	req->n_rows = n_rows;
+	req->res = -1;
+	req->fiber = fiber();
+	return req;
+}
+
+/** Write a request to a log in a single transaction. */
+static ssize_t
+wal_request_write(struct wal_request *req, struct xlog *l)
+{
+	/*
+	 * Iterate over request rows (tx statements)
+	 */
+	xlog_tx_begin(l);
+	struct xrow_header **row = req->rows;
+	for (; row < req->rows + req->n_rows; row++) {
+		(*row)->tm = ev_now(loop());
+		if (xlog_write_row(l, *row) < 0) {
+			/*
+			 * Rollback all un-written rows
+			 */
+			xlog_tx_rollback(l);
+			return -1;
+		}
+	}
+	return xlog_tx_commit(l);
 }
 
 /**
@@ -220,10 +270,12 @@ tx_schedule_rollback(struct cmsg *msg)
 static void
 wal_writer_create(struct wal_writer *writer, enum wal_mode wal_mode,
 		  const char *wal_dirname, const struct tt_uuid *instance_uuid,
-		  struct vclock *vclock, int64_t rows_per_wal)
+		  struct vclock *vclock, int64_t wal_max_rows,
+		  int64_t wal_max_size)
 {
 	writer->wal_mode = wal_mode;
-	writer->rows_per_wal = rows_per_wal;
+	writer->wal_max_rows = wal_max_rows;
+	writer->wal_max_size = wal_max_size;
 
 	xdir_create(&writer->wal_dir, wal_dirname, XLOG, instance_uuid);
 	writer->is_active = false;
@@ -275,14 +327,16 @@ wal_thread_start()
 void
 wal_init(enum wal_mode wal_mode, const char *wal_dirname,
 	 const struct tt_uuid *instance_uuid, struct vclock *vclock,
-	 int64_t rows_per_wal)
+	 int64_t wal_max_rows, int64_t wal_max_size)
 {
-	assert(rows_per_wal > 1);
+	assert(wal_max_rows > 1);
 
 	struct wal_writer *writer = &wal_writer_singleton;
 
 	wal_writer_create(writer, wal_mode, wal_dirname, instance_uuid,
-			  vclock, rows_per_wal);
+			  vclock, wal_max_rows, wal_max_size);
+
+	xdir_scan_xc(&writer->wal_dir);
 
 	wal = writer;
 }
@@ -306,7 +360,6 @@ wal_thread_stop()
 		wal = NULL;
 	}
 
-	rmean_tx_wal_bus = NULL;
 }
 
 struct wal_checkpoint: public cmsg
@@ -364,6 +417,32 @@ wal_checkpoint(struct vclock *vclock, bool rotate)
 	fiber_set_cancellable(true);
 }
 
+struct wal_gc_msg: public cbus_call_msg
+{
+	int64_t lsn;
+};
+
+static int
+wal_collect_garbage_f(struct cbus_call_msg *data)
+{
+	int64_t lsn = ((struct wal_gc_msg *)data)->lsn;
+	xdir_collect_garbage(&wal->wal_dir, lsn);
+	return 0;
+}
+
+void
+wal_collect_garbage(int64_t lsn)
+{
+	if (wal == NULL)
+		return;
+	struct wal_gc_msg msg;
+	msg.lsn = lsn;
+	bool cancellable = fiber_set_cancellable(false);
+	cbus_call(&wal_thread.wal_pipe, &wal_thread.tx_pipe, &msg,
+		  wal_collect_garbage_f, NULL, TIMEOUT_INFINITY);
+	fiber_set_cancellable(cancellable);
+}
+
 /**
  * If there is no current WAL, try to open it, and close the
  * previous WAL. We close the previous WAL only after opening
@@ -386,7 +465,8 @@ wal_opt_rotate(struct wal_writer *writer)
 	 * one.
 	 */
 	if (writer->is_active &&
-	    writer->current_wal.rows >= writer->rows_per_wal) {
+	    (writer->current_wal.rows >= writer->wal_max_rows ||
+	     writer->current_wal.offset >= writer->wal_max_size)) {
 		/*
 		 * We can not handle xlog_close()
 		 * failure in any reasonable way.
@@ -399,11 +479,22 @@ wal_opt_rotate(struct wal_writer *writer)
 	if (writer->is_active)
 		return 0;
 
-	if (xdir_create_xlog(&writer->wal_dir, &writer->current_wal,
-			     &writer->vclock) != 0) {
+	struct vclock *vclock = (struct vclock *)malloc(sizeof(*vclock));
+	if (vclock == NULL) {
+		diag_set(OutOfMemory, sizeof(*vclock),
+			 "malloc", "struct vclock");
 		error_log(diag_last_error(diag_get()));
 		return -1;
 	}
+	vclock_copy(vclock, &writer->vclock);
+
+	if (xdir_create_xlog(&writer->wal_dir, &writer->current_wal,
+			     &writer->vclock) != 0) {
+		error_log(diag_last_error(diag_get()));
+		free(vclock);
+		return -1;
+	}
+	xdir_add_vclock(&writer->wal_dir, vclock);
 	writer->is_active = true;
 
 	return 0;
@@ -508,21 +599,7 @@ wal_write_to_disk(struct cmsg *msg)
 	 */
 	struct wal_request *req, *last_commit_req = NULL;
 	stailq_foreach_entry(req, &wal_msg->commit, fifo) {
-		/*
-		 * Iterate over request rows (tx statements)
-		 */
-		xlog_tx_begin(l);
-		struct xrow_header **row = req->rows;
-		for (; row < req->rows + req->n_rows; row++) {
-			if (xlog_write_row(l, *row) < 0) {
-				/*
-				 * Rollback all un-written rows
-				 */
-				xlog_tx_rollback(l);
-				goto done;
-			}
-		}
-		int rc = xlog_tx_commit(l);
+		int rc = wal_request_write(req, l);
 		if (rc < 0) {
 			goto done;
 		}
@@ -555,10 +632,10 @@ done:
 	/* Update status of the successfully committed requests. */
 	for (; req != rollback_req; req = stailq_next_entry(req, fifo)) {
 
+		/** All rows in a transaction have the same replica_id */
+		struct xrow_header *last = req->rows[req->n_rows - 1];
 		/* Update internal vclock */
-		vclock_follow(&writer->vclock,
-			      req->rows[req->n_rows - 1]->replica_id,
-			      req->rows[req->n_rows - 1]->lsn);
+		vclock_follow(&writer->vclock, last->replica_id, last->lsn);
 		/* Update row counter for wal_opt_rotate() */
 		l->rows += req->n_rows;
 		/* Mark request as successful for tx thread */
@@ -597,6 +674,10 @@ wal_thread_f(va_list ap)
 		xlog_close(&wal->current_wal, false);
 		wal->is_active = false;
 	}
+	if (xctl_writer.is_active) {
+		xlog_close(&xctl_writer.xlog, false);
+		xctl_writer.is_active = false;
+	}
 	cpipe_destroy(&wal_thread.tx_pipe);
 	return 0;
 }
@@ -624,9 +705,6 @@ wal_write(struct wal_request *req)
 			  vclock_sum(&writer->vclock));
 		return -1;
 	}
-
-	req->fiber = fiber();
-	req->res = -1;
 
 	struct wal_msg *batch;
 	if (!stailq_empty(&wal_thread.wal_pipe.input) &&
@@ -659,6 +737,64 @@ wal_write(struct wal_request *req)
 	fiber_yield(); /* Request was inserted. */
 	fiber_set_cancellable(cancellable);
 	return req->res;
+}
+
+struct wal_write_xctl_msg: public cbus_call_msg
+{
+	struct wal_request *req;
+};
+
+static int
+wal_write_xctl_f(struct cbus_call_msg *msg)
+{
+	struct wal_request *req = ((struct wal_write_xctl_msg *)msg)->req;
+
+	if (!xctl_writer.is_active) {
+		if (xctl_open(&xctl_writer.xlog) < 0)
+			return -1;
+		xctl_writer.is_active = true;
+	}
+
+	if (wal_request_write(req, &xctl_writer.xlog) < 0)
+		return -1;
+
+	if (xlog_flush(&xctl_writer.xlog) < 0)
+		return -1;
+
+	return 0;
+}
+
+int
+wal_write_xctl(struct wal_request *req)
+{
+	struct wal_write_xctl_msg msg;
+	msg.req = req;
+	bool cancellable = fiber_set_cancellable(false);
+	int rc = cbus_call(&wal_thread.wal_pipe, &wal_thread.tx_pipe, &msg,
+			   wal_write_xctl_f, NULL, TIMEOUT_INFINITY);
+	fiber_set_cancellable(cancellable);
+	return rc;
+}
+
+static int
+wal_rotate_xctl_f(struct cbus_call_msg *msg)
+{
+	(void) msg;
+	if (xctl_writer.is_active) {
+		xlog_close(&xctl_writer.xlog, false);
+		xctl_writer.is_active = false;
+	}
+	return 0;
+}
+
+void
+wal_rotate_xctl()
+{
+	struct cbus_call_msg msg;
+	bool cancellable = fiber_set_cancellable(false);
+	cbus_call(&wal_thread.wal_pipe, &wal_thread.tx_pipe, &msg,
+		  wal_rotate_xctl_f, NULL, TIMEOUT_INFINITY);
+	fiber_set_cancellable(cancellable);
 }
 
 int
@@ -715,5 +851,9 @@ wal_atfork()
 		xlog_atfork(&wal->current_wal);
 		wal->is_active = false;
 		wal = NULL;
+	}
+	if (xctl_writer.is_active) {
+		xlog_atfork(&xctl_writer.xlog);
+		xctl_writer.is_active = false;
 	}
 }

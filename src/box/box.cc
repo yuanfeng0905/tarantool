@@ -67,6 +67,7 @@
 #include "xrow_io.h"
 #include "authentication.h"
 #include "path_lock.h"
+#include "xctl.h"
 #include "sql.h"
 
 static char status[64] = "unknown";
@@ -97,8 +98,7 @@ static bool is_ro = true;
 static const int REPLICATION_CFG_TIMEOUT = 10; /* seconds */
 
 /* Use the shared instance of xstream for all appliers */
-static struct xstream initial_join_stream;
-static struct xstream final_join_stream;
+static struct xstream join_stream;
 static struct xstream subscribe_stream;
 
 /**
@@ -119,12 +119,8 @@ static struct cbus_endpoint tx_prio_endpoint;
 static void
 box_check_writable(void)
 {
-	/*
-	 * box is only writable if
-	 *   box.cfg.read_only == false and
-	 *   replica id is registered in _cluster table
-	 */
-	if (is_ro || recovery->replica_id == 0)
+	/* box is only writable if box.cfg.read_only == false and */
+	if (is_ro)
 		tnt_raise(LoggedError, ER_READONLY);
 }
 
@@ -239,6 +235,14 @@ box_is_ro(void)
 	return is_ro;
 }
 
+struct wal_stream {
+	struct xstream base;
+	/** How many rows have been recovered so far. */
+	size_t rows;
+	/** Yield once per 'yield' rows. */
+	size_t yield;
+};
+
 static inline void
 apply_row(struct xstream *stream, struct xrow_header *row)
 {
@@ -248,14 +252,6 @@ apply_row(struct xstream *stream, struct xrow_header *row)
 	struct space *space = space_cache_find(request->space_id);
 	process_rw(request, space, NULL);
 }
-
-struct wal_stream {
-	struct xstream base;
-	/** How many rows have been recovered so far. */
-	size_t rows;
-	/** Yield once per 'yield' rows. */
-	size_t yield;
-};
 
 static void
 apply_wal_row(struct xstream *stream, struct xrow_header *row)
@@ -273,7 +269,7 @@ apply_wal_row(struct xstream *stream, struct xrow_header *row)
 }
 
 static void
-wal_stream_create(struct wal_stream *ctx, size_t rows_per_wal)
+wal_stream_create(struct wal_stream *ctx, size_t wal_max_rows)
 {
 	xstream_create(&ctx->base, apply_wal_row);
 	ctx->rows = 0;
@@ -283,17 +279,12 @@ wal_stream_create(struct wal_stream *ctx, size_t rows_per_wal)
 	 * Each yield can take up to 1ms if there are no events,
 	 * so we can't afford many of them during recovery.
 	 */
-	ctx->yield = (rows_per_wal >> 4)  + 1;
+	ctx->yield = (wal_max_rows >> 4)  + 1;
 }
 
 static void
 apply_initial_join_row(struct xstream *stream, struct xrow_header *row)
 {
-	if (row->type != IPROTO_INSERT) {
-		tnt_raise(ClientError, ER_UNKNOWN_REQUEST_TYPE,
-				(uint32_t) row->type);
-	}
-
 	(void) stream;
 	struct request *request;
 	request = region_alloc_object_xc(&fiber()->gc, struct request);
@@ -305,16 +296,6 @@ apply_initial_join_row(struct xstream *stream, struct xrow_header *row)
 	struct space *space = space_cache_find(request->space_id);
 	/* no access checks here - applier always works with admin privs */
 	space->handler->applyInitialJoinRow(space, request);
-}
-
-static void
-apply_subscribe_row(struct xstream *stream, struct xrow_header *row)
-{
-	/* Check lsn */
-	int64_t current_lsn = vclock_get(&recovery->vclock, row->replica_id);
-	if (row->lsn <= current_lsn)
-		return;
-	apply_row(stream, row);
 }
 
 /* {{{ configuration bindings */
@@ -377,14 +358,25 @@ box_check_readahead(int readahead)
 }
 
 static int64_t
-box_check_rows_per_wal(int64_t rows_per_wal)
+box_check_wal_max_rows(int64_t wal_max_rows)
 {
 	/* check rows_per_wal configuration */
-	if (rows_per_wal <= 1) {
+	if (wal_max_rows <= 1) {
 		tnt_raise(ClientError, ER_CFG, "rows_per_wal",
 			  "the value must be greater than one");
 	}
-	return rows_per_wal;
+	return wal_max_rows;
+}
+
+static int64_t
+box_check_wal_max_size(int64_t wal_max_size)
+{
+	/* check wal_max_bytes configuration */
+	if (wal_max_size <= 1) {
+		tnt_raise(ClientError, ER_CFG, "wal_max_size",
+			  "the value must be greater than one");
+	}
+	return wal_max_size;
 }
 
 void
@@ -394,7 +386,8 @@ box_check_config()
 	box_check_uri(cfg_gets("listen"), "listen");
 	box_check_replication();
 	box_check_readahead(cfg_geti("readahead"));
-	box_check_rows_per_wal(cfg_geti64("rows_per_wal"));
+	box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
+	box_check_wal_max_size(cfg_geti64("wal_max_size"));
 	box_check_wal_mode(cfg_gets("wal_mode"));
 	box_check_memtx_min_tuple_size(cfg_geti64("memtx_min_tuple_size"));
 	if (cfg_geti64("vinyl_page_size") > cfg_geti64("vinyl_range_size"))
@@ -423,8 +416,7 @@ cfg_get_replication(int *p_count)
 	for (int i = 0; i < count; i++) {
 		const char *source = cfg_getarr_elem("replication", i);
 		struct applier *applier = applier_new(source,
-						      &initial_join_stream,
-						      &final_join_stream,
+						      &join_stream,
 						      &subscribe_stream);
 		if (applier == NULL) {
 			/* Delete created appliers */
@@ -831,7 +823,7 @@ space_truncate(struct space *space)
 
 	/* create all indexes again, now they are empty */
 	for (int i = 0; i < index_count; i++) {
-		int64_t lsn = vclock_sum(&recovery->vclock);
+		int64_t lsn = vclock_sum(&replicaset_vclock);
 		/*
 		 * The returned tuple is blessed and will be
 		 * collected automatically.
@@ -1279,7 +1271,8 @@ box_process_subscribe(struct ev_io *io, struct xrow_header *header)
 	 * instance, this is the only way for a replica to find
 	 * out the id of the instance it has connected to.
 	 */
-	row.replica_id = recovery->replica_id;
+	struct replica *self = replica_by_uuid(&INSTANCE_UUID);
+	row.replica_id = self->id;
 	row.sync = header->sync;
 	coio_write_xrow(io, &row);
 
@@ -1334,6 +1327,7 @@ box_free(void)
 #endif
 		engine_shutdown();
 		wal_thread_stop();
+		xctl_free();
 	}
 }
 
@@ -1373,13 +1367,12 @@ bootstrap_master(void)
 	uint32_t replica_id = 1;
 
 	/* Unregister a local replica if it was registered by bootstrap.bin */
-	assert(recovery->replica_id == 0);
 	if (boxk(IPROTO_DELETE, BOX_CLUSTER_ID, "[%u]", 1) != 0)
 		diag_raise();
 
 	/* Register the first replica in the replica set */
 	box_register_replica(replica_id, &INSTANCE_UUID);
-	assert(recovery->replica_id == 1);
+	assert(replica_by_uuid(&INSTANCE_UUID)->id == 1);
 
 	/* Register other cluster members */
 	replicaset_foreach(replica) {
@@ -1425,7 +1418,12 @@ bootstrap_from_master(struct replica *master, struct vclock *start_vclock)
 	 */
 	engine_begin_initial_recovery(NULL);
 
+
 	applier_resume_to_state(applier, APPLIER_FINAL_JOIN, TIMEOUT_INFINITY);
+	/*
+	 * Hack: reset recovery vclock polluted by initial join
+	 */
+	vclock_create(start_vclock);
 	/*
 	 * Process final data (WALs).
 	 */
@@ -1433,12 +1431,8 @@ bootstrap_from_master(struct replica *master, struct vclock *start_vclock)
 
 	applier_resume_to_state(applier, APPLIER_JOINED, TIMEOUT_INFINITY);
 
-	/* Check replica_id registration in _cluster */
-	if (recovery->replica_id == REPLICA_ID_NIL)
-		panic("replica id has not received from master");
-
 	/* Start replica vclock using master's vclock */
-	vclock_copy(start_vclock, &applier->vclock);
+	vclock_copy(start_vclock, &replicaset_vclock);
 
 	/* Finalize the new replica */
 	engine_end_recovery();
@@ -1462,6 +1456,8 @@ bootstrap(struct vclock *start_vclock)
 	struct replica *master = replicaset_first();
 	assert(master == NULL || master->applier != NULL);
 
+	if (xctl_bootstrap() != 0)
+		diag_raise();
 	if (master != NULL && !tt_uuid_is_equal(&master->uuid, &INSTANCE_UUID)) {
 		bootstrap_from_master(master, start_vclock);
 	} else {
@@ -1515,6 +1511,7 @@ box_cfg_xc(void)
 	rmean_box = rmean_new(iproto_type_strs, IPROTO_TYPE_STAT_MAX);
 	rmean_error = rmean_new(rmean_error_strings, RMEAN_ERROR_LAST);
 
+	xctl_init();
 	engine_init();
 
 	schema_init();
@@ -1528,11 +1525,8 @@ box_cfg_xc(void)
 	title("loading");
 
 	box_set_too_long_threshold();
-	struct wal_stream wal_stream;
-	wal_stream_create(&wal_stream, cfg_geti64("rows_per_wal"));
-	xstream_create(&initial_join_stream, apply_initial_join_row);
-	xstream_create(&final_join_stream, apply_row);
-	xstream_create(&subscribe_stream, apply_subscribe_row);
+	xstream_create(&join_stream, apply_initial_join_row);
+	xstream_create(&subscribe_stream, apply_row);
 
 	struct vclock checkpoint_vclock;
 	vclock_create(&checkpoint_vclock);
@@ -1563,6 +1557,11 @@ box_cfg_xc(void)
 		box_bind();
 	}
 	if (lsn != -1) {
+		struct wal_stream wal_stream;
+		wal_stream_create(&wal_stream, cfg_geti64("rows_per_wal"));
+
+		if (xctl_begin_recovery(&checkpoint_vclock) != 0)
+			diag_raise();
 		engine_begin_initial_recovery(&checkpoint_vclock);
 		MemtxEngine *memtx = (MemtxEngine *) engine_find("memtx");
 		/**
@@ -1601,6 +1600,8 @@ box_cfg_xc(void)
 		}
 		recovery_finalize(recovery, &wal_stream.base);
 		engine_end_recovery();
+		if (xctl_end_recovery() != 0)
+			diag_raise();
 
 		/** Begin listening only when the local recovery is complete. */
 		box_listen();
@@ -1622,15 +1623,31 @@ box_cfg_xc(void)
 	}
 	fiber_gc();
 
-	/* The replica must be registered in _cluster */
-	assert(recovery->replica_id != REPLICA_ID_NIL);
+	/* Check for correct registration of the instance in _cluster */
+	{
+		struct replica *self = replica_by_uuid(&INSTANCE_UUID);
+		if (self == NULL || self->id == REPLICA_ID_NIL) {
+			tnt_raise(ClientError, ER_UNKNOWN_REPLICA,
+				  tt_uuid_str(&INSTANCE_UUID),
+				  tt_uuid_str(&REPLICASET_UUID));
+		}
+	}
+
+	/*
+	 * Initialize the replica set vclock from recovery.
+	 * The local WAL may contain rows from remote masters,
+	 * so we must reflect this in replicaset_vclock to
+	 * not attempt to apply these rows twice.
+	 */
+	vclock_copy(&replicaset_vclock, &recovery->vclock);
 
 	/* Start WAL writer */
-	int64_t rows_per_wal = box_check_rows_per_wal(cfg_geti64("rows_per_wal"));
+	int64_t wal_max_rows = box_check_wal_max_rows(cfg_geti64("rows_per_wal"));
+	int64_t wal_max_size = box_check_wal_max_size(cfg_geti64("wal_max_size"));
 	enum wal_mode wal_mode = box_check_wal_mode(cfg_gets("wal_mode"));
 	if (wal_mode != WAL_NONE) {
 		wal_init(wal_mode, cfg_gets("wal_dir"), &INSTANCE_UUID,
-			 &recovery->vclock, rows_per_wal);
+			 &recovery->vclock, wal_max_rows, wal_max_size);
 	}
 
 	rmean_cleanup(rmean_box);
@@ -1699,6 +1716,14 @@ end:
 	latch_unlock(&schema_lock);
 	box_snapshot_is_in_progress = false;
 	return rc;
+}
+
+void
+box_gc(int64_t lsn)
+{
+	xctl_collect_garbage(lsn);
+	wal_collect_garbage(lsn);
+	engine_collect_garbage(lsn);
 }
 
 const char *

@@ -32,7 +32,11 @@
  * SUCH DAMAGE.
  */
 
-#include <assert.h>
+#include "diag.h"
+
+#if defined(__cplusplus)
+extern "C" {
+#endif /* defined(__cplusplus) */
 
 struct xrow_header;
 struct xstream;
@@ -49,10 +53,19 @@ xstream_create(struct xstream *xstream, xstream_write_f write)
 	xstream->write = write;
 }
 
+int
+xstream_write(struct xstream *stream, struct xrow_header *row);
+
+#if defined(__cplusplus)
+} /* extern C */
+
 static inline void
-xstream_write(struct xstream *stream, struct xrow_header *row)
+xstream_write_xc(struct xstream *stream, struct xrow_header *row)
 {
-	return stream->write(stream, row);
+	if (xstream_write(stream, row) != 0)
+		diag_raise();
 }
+
+#endif /* defined(__cplusplus) */
 
 #endif /* TARANTOOL_XSTREAM_H_INCLUDED */

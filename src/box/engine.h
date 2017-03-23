@@ -142,8 +142,15 @@ public:
 	/**
 	 * Begin a two-phase snapshot creation in this
 	 * engine (snapshot is a memtx idea of a checkpoint).
+	 * Must not yield.
 	 */
 	virtual int beginCheckpoint();
+	/**
+	 * Prepare to wait for a checkpoint.
+	 * Called right after WAL checkpoint.
+	 * Must not yield.
+	 */
+	virtual int prepareWaitCheckpoint(struct vclock *vclock);
 	/**
 	 * Wait for a checkpoint to complete.
 	 */
@@ -157,6 +164,11 @@ public:
 	 * An error in one of the engines, abort checkpoint.
 	 */
 	virtual void abortCheckpoint();
+	/**
+	 * Remove files that are not needed to recover
+	 * from snapshot with @lsn or newer.
+	 */
+	virtual void collectGarbage(int64_t lsn);
 public:
 	/** Name of the engine. */
 	const char *name;
@@ -289,6 +301,9 @@ engine_commit_checkpoint(struct vclock *vclock);
 
 void
 engine_abort_checkpoint();
+
+void
+engine_collect_garbage(int64_t lsn);
 
 /**
  * Feed snapshot data as join events to the replicas.

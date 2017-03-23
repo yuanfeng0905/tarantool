@@ -36,6 +36,7 @@
 #include "salad/stailq.h"
 
 struct fiber;
+struct vclock;
 struct wal_writer;
 
 enum wal_mode { WAL_NONE = 0, WAL_WRITE, WAL_FSYNC, WAL_MODE_MAX };
@@ -44,26 +45,24 @@ enum wal_mode { WAL_NONE = 0, WAL_WRITE, WAL_FSYNC, WAL_MODE_MAX };
 extern const char *wal_mode_STRS[];
 
 extern struct wal_writer *wal;
-extern struct rmean *rmean_tx_wal_bus;
 extern int wal_dir_lock;
-
-#if defined(__cplusplus)
 
 struct wal_request {
 	struct stailq_entry fifo;
-	/*
-	 * On success, contains vclock signature (lsn) of
-	 * committed transaction, on error is -1
+	/**
+	 * On success, contains vclock signature of
+	 * the committed transaction, on error is -1
 	 */
 	int64_t res;
 	struct fiber *fiber;
-	/* Relative position of the start of request (used for rollback) */
-	off_t start_offset;
-	/* Relative position of the end of request (used for rollback) */
-	off_t end_offset;
 	int n_rows;
 	struct xrow_header *rows[];
 };
+
+#if defined(__cplusplus)
+
+struct wal_request *
+wal_request_new(size_t n_rows);
 
 int64_t
 wal_write(struct wal_request *req);
@@ -74,7 +73,7 @@ wal_thread_start();
 void
 wal_init(enum wal_mode wal_mode, const char *wal_dirname,
 	 const struct tt_uuid *instance_uuid, struct vclock *vclock,
-	 int64_t rows_per_wal);
+	 int64_t wal_max_rows, int64_t wal_max_size);
 
 void
 wal_thread_stop();
@@ -112,6 +111,25 @@ extern "C" {
  */
 void
 wal_checkpoint(struct vclock *vclock, bool rotate);
+
+/**
+ * Remove WAL files that are not needed to recover
+ * from snapshot with @lsn or newer.
+ */
+void
+wal_collect_garbage(int64_t lsn);
+
+/**
+ * Write xrows to the metadata log.
+ */
+int
+wal_write_xctl(struct wal_request *req);
+
+/**
+ * Rotate the metadata log.
+ */
+void
+wal_rotate_xctl();
 
 #if defined(__cplusplus)
 } /* extern "C" */

@@ -19,6 +19,7 @@ assert(tuple_encode ~= nil and tuple_bless ~= nil and is_tuple ~= nil)
 ffi.cdef[[
     struct space *space_by_id(uint32_t id);
     void space_run_triggers(struct space *space, bool yesno);
+    size_t space_bsize(struct space *space);
 
     typedef struct tuple box_tuple_t;
     typedef struct iterator box_iterator_t;
@@ -887,15 +888,6 @@ function box.schema.space.bless(space)
     index_mt.update = function(index, key, ops)
         return internal.update(index.space_id, index.id, keify(key), ops);
     end
-    index_mt.upsert = function(index, tuple_key, ops, deprecated)
-        if deprecated ~= nil then
-            local msg = "Error: extra argument in upsert call: "
-            msg = msg .. tostring(deprecated)
-            msg = msg .. ". Usage :upsert(tuple, operations)"
-            box.error(box.error.PROC_LUA, msg)
-        end
-        return internal.upsert(index.space_id, index.id, tuple_key, ops);
-    end
     index_mt.delete = function(index, key)
         return internal.delete(index.space_id, index.id, keify(key));
     end
@@ -940,6 +932,13 @@ function box.schema.space.bless(space)
         end
         return space.index[0]:count(key, opts)
     end
+    space_mt.bsize = function(space)
+        local s = builtin.space_by_id(space.id)
+        if s == nil then
+            box.error(box.error.NO_SUCH_SPACE, space.name)
+        end
+        return builtin.space_bsize(s)
+    end
     space_mt.__newindex = index_mt.__newindex
 
     space_mt.get = function(space, key)
@@ -962,8 +961,14 @@ function box.schema.space.bless(space)
         return space.index[0]:update(key, ops)
     end
     space_mt.upsert = function(space, tuple_key, ops, deprecated)
+        if deprecated ~= nil then
+            local msg = "Error: extra argument in upsert call: "
+            msg = msg .. tostring(deprecated)
+            msg = msg .. ". Usage :upsert(tuple, operations)"
+            box.error(box.error.PROC_LUA, msg)
+        end
         check_index(space, 0)
-        return space.index[0]:upsert(tuple_key, ops, deprecated)
+        return internal.upsert(space.id, tuple_key, ops);
     end
     space_mt.delete = function(space, key)
         check_index(space, 0)

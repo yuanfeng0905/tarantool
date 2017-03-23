@@ -30,7 +30,7 @@ test:is(file:read():match('I>%s+(.*)'), "gh-700: %s %f %d", "formatting")
 file:close()
 log.rotate()
 
-test:ok(log.logger_pid() >= 0, "logger_pid()")
+test:ok(log.pid() >= 0, "pid()")
 
 -- logger uses 'debug', try to set it to nil
 debug = nil

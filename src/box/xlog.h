@@ -58,7 +58,11 @@ extern const struct type type_XlogError;
  * used for logs and snapshots, but an xlog object sees only
  * those files which match its type.
  */
-enum xdir_type { SNAP, XLOG };
+enum xdir_type {
+	SNAP,		/* memtx snapshot */
+	XLOG,		/* write ahead log */
+	XCTL,		/* metadata log */
+};
 
 /**
  * Newly created snapshot files get .inprogress filename suffix.
@@ -171,6 +175,12 @@ xdir_format_filename(struct xdir *dir, int64_t signature,
 		     enum log_suffix suffix);
 
 /**
+ * Remove files whose signature is less than specified.
+ */
+void
+xdir_collect_garbage(struct xdir *dir, int64_t signature);
+
+/**
  * Return LSN of the newest file in a directory
  * or -1 if the directory is empty.
  */
@@ -186,7 +196,7 @@ xdir_last_vclock(struct xdir *xdir, struct vclock *vclock)
 
 /**
  * Insert a vclock into the file index of a directory.
- * The vclock must be allocated with malloc.
+ * The vclock must be allocated with malloc().
  */
 static inline void
 xdir_add_vclock(struct xdir *xdir, struct vclock *vclock)
