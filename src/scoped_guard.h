@@ -31,6 +31,8 @@
  * THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  */
+#include <fiber.h>
+#include <small/region.h>
 
 template <typename Functor>
 struct ScopedGuard {
@@ -65,5 +67,18 @@ make_scoped_guard(Functor guard)
 {
 	return ScopedGuard<Functor>(guard);
 }
+
+struct FiberGcScopedGuard {
+	FiberGcScopedGuard()
+	{
+		size = region_used(&fiber()->gc);
+	}
+	~FiberGcScopedGuard()
+	{
+		region_truncate(&fiber()->gc, size);
+	}
+private:
+	size_t size;
+};
 
 #endif /* TARANTOOL_SCOPED_GUARD_H_INCLUDED */

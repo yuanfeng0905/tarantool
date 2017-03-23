@@ -38,10 +38,15 @@
 struct func *
 func_new(struct func_def *def)
 {
-	struct func *func = (struct func *) malloc(sizeof(struct func));
+	size_t len = strlen(def->name);
+	struct func *func = (struct func *) malloc(
+		sizeof(struct func) + len + 1
+	);
 	if (func == NULL)
 		return NULL;
 	func->def = *def;
+	func->def.name = strcpy((char *)func + sizeof(*func), def->name);
+
 	/** Nobody has access to the function but the owner. */
 	memset(func->access, 0, sizeof(func->access));
 	/*
@@ -132,8 +137,12 @@ func_load(struct func *func)
 void
 func_update(struct func *func, struct func_def *def)
 {
+	const char *p;
+	assert(strcmp(func->def.name, def->name) == 0);
 	func_unload(func);
+	p = func->def.name;
 	func->def = *def;
+	func->def.name = p;
 }
 
 void

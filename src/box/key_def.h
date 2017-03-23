@@ -50,7 +50,7 @@ enum {
 	BOX_SPACE_MAX = INT32_MAX,
 	BOX_FUNCTION_MAX = 32000,
 	BOX_INDEX_MAX = 128,
-	BOX_NAME_MAX = 64,
+	BOX_NAME_MAX = 511,
 	BOX_ENGINE_NAME_MAX = 7,
 	BOX_FIELD_MAX = INT32_MAX,
 	BOX_USER_MAX = 32,
@@ -322,7 +322,7 @@ struct func_def {
 	 */
 	enum func_language language;
 	/** Function name. */
-	char name[BOX_NAME_MAX + 1];
+	const char *name;
 };
 
 /**

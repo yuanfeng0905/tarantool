@@ -128,9 +128,13 @@ extern struct user *guest_user, *admin_user;
  * find space in users[] array and store the new
  * user in it. Update user->auth_token
  * with an index in the users[] array.
+ *
+ * Name is assumed to point to a chunk of memory obtained from malloc.
+ * User system will eventualy free it.
+ * If name==NULL, the function will duplicate the name from user_def.
  */
 struct user *
-user_cache_replace(struct user_def *user);
+user_cache_replace(struct user_def *user, const char *name);
 
 /**
  * Find a user by id and delete it from the

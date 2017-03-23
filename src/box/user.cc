@@ -159,6 +159,7 @@ user_create(struct user *user, uint8_t auth_token)
 	user->auth_token = auth_token;
 	privset_new(&user->privs);
 	region_create(&user->pool, &cord()->slabc);
+	user->def.name = NULL;
 }
 
 static void
@@ -171,6 +172,7 @@ user_destroy(struct user *user)
 	 * all privileges from them first.
 	 */
 	region_destroy(&user->pool);
+	free((char *)user->def.name);
 	memset(user, 0, sizeof(*user));
 }
 
@@ -380,7 +382,7 @@ auth_token_put(uint8_t auth_token)
 /* {{{ user cache */
 
 struct user *
-user_cache_replace(struct user_def *def)
+user_cache_replace(struct user_def *def, const char *name)
 {
 	struct user *user = user_by_id(def->uid);
 	if (user == NULL) {
@@ -389,8 +391,21 @@ user_cache_replace(struct user_def *def)
 		user_create(user, auth_token);
 		struct mh_i32ptr_node_t node = { def->uid, user };
 		mh_i32ptr_put(user_registry, &node, NULL, NULL);
+	} else {
+		free((char *)user->def.name);
 	}
-	*(struct user_def *) user = *def;
+	if (name == NULL) {
+		name = strdup(def->name);
+		if (name == NULL) {
+			/* Auth_token_get() may throw, using the same
+			 * error-reporting method for consistency. */
+			tnt_raise(OutOfMemory, strlen(user->def.name),
+				  "malloc", "name (user)");
+		}
+	}
+	assert(strcmp(name, def->name) == 0);
+	user->def = *def;
+	user->def.name = name;
 	return user;
 }
 
@@ -440,10 +455,8 @@ user_find_by_name(const char *name, uint32_t len)
 	uint32_t uid = schema_find_id(BOX_USER_ID, 2, name, len);
 	struct user *user = user_by_id(uid);
 	if (user == NULL || user->def.type != SC_USER) {
-		char name_buf[BOX_NAME_MAX + 1];
-		/* \0 - to correctly print user name the error message. */
-		snprintf(name_buf, sizeof(name_buf), "%.*s", len, name);
-		diag_set(ClientError, ER_NO_SUCH_USER, name_buf);
+		diag_set(ClientError, ER_NO_SUCH_USER,
+			 error_abbreviate(name, len));
 		return NULL;
 	}
 	return user;
@@ -465,19 +478,19 @@ user_cache_init()
 	 */
 	struct user_def def;
 	memset(&def, 0, sizeof(def));
-	snprintf(def.name, sizeof(def.name), "guest");
+	def.name = "guest";
 	def.owner = ADMIN;
 	def.type = SC_USER;
-	struct user *user = user_cache_replace(&def);
+	struct user *user = user_cache_replace(&def, NULL);
 	/* 0 is the auth token and user id by default. */
 	assert(user->def.uid == GUEST && user->auth_token == GUEST);
 	(void)user;
 
 	memset(&def, 0, sizeof(def));
-	snprintf(def.name, sizeof(def.name), "admin");
+	def.name = "admin";
 	def.uid = def.owner = ADMIN;
 	def.type = SC_USER;
-	user = user_cache_replace(&def);
+	user = user_cache_replace(&def, NULL);
 	/* ADMIN is both the auth token and user id for 'admin' user. */
 	assert(user->def.uid == ADMIN && user->auth_token == ADMIN);
 }

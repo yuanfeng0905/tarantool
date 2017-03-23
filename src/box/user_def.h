@@ -69,7 +69,7 @@ struct user_def {
 	/** User password - hash2 */
 	char hash2[SCRAMBLE_SIZE];
 	/** User name - for error messages and debugging */
-	char name[BOX_NAME_MAX + 1];
+	const char *name;
 };
 
 /** Predefined user ids. */

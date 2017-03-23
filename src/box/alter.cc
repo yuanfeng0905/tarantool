@@ -373,7 +373,6 @@ static void
 key_def_fill_parts(struct key_def *key_def, const char *parts,
 		   uint32_t part_count)
 {
-	char buf[BOX_NAME_MAX];
 	for (uint32_t i = 0; i < part_count; i++) {
 		if (mp_typeof(*parts) != MP_ARRAY)
 			tnt_raise(ClientError, ER_WRONG_INDEX_PARTS,
@@ -396,8 +395,7 @@ key_def_fill_parts(struct key_def *key_def, const char *parts,
 		const char *str = mp_decode_str(&parts, &len);
 		for (uint32_t j = 2; j < item_count; j++)
 			mp_next(&parts);
-		snprintf(buf, sizeof(buf), "%.*s", len, str);
-		enum field_type field_type = field_type_by_name(buf);
+		enum field_type field_type = field_type_by_name(tt_cstr(str, len));
 		if (field_type == field_type_MAX) {
 			tnt_raise(ClientError, ER_MODIFY_INDEX,
 				  key_def->name,
@@ -421,13 +419,11 @@ static void
 key_def_fill_parts_165(struct key_def *key_def, const char *parts,
 		       uint32_t part_count)
 {
-	char buf[BOX_NAME_MAX];
 	for (uint32_t i = 0; i < part_count; i++) {
 		uint32_t field_no = (uint32_t) mp_decode_uint(&parts);
 		uint32_t len;
 		const char *str = mp_decode_str(&parts, &len);
-		snprintf(buf, sizeof(buf), "%.*s", len, str);
-		enum field_type field_type = field_type_by_name(buf);
+		enum field_type field_type = field_type_by_name(tt_cstr(str, len));
 		if (field_type == field_type_MAX) {
 			tnt_raise(ClientError, ER_MODIFY_INDEX,
 				  key_def->name,
@@ -1025,7 +1021,8 @@ ModifySpace::prepare(struct alter_space *alter)
 			  space_name(alter->old_space),
 			  "space id is immutable");
 
-	if (strcmp(def.engine_name, alter->old_space->def.engine_name) != 0)
+	if (strcmp(def.engine_name,
+		   alter->old_space->def.engine_name) != 0)
 		tnt_raise(ClientError, ER_ALTER_SPACE,
 			  space_name(alter->old_space),
 			  "can not change space engine");
@@ -1726,17 +1723,22 @@ user_def_create_from_tuple(struct user_def *user, struct tuple *tuple)
 	user->owner = tuple_field_u32_xc(tuple, UID);
 	const char *user_type = tuple_field_cstr_xc(tuple, USER_TYPE);
 	user->type= schema_object_type(user_type);
-	const char *name = tuple_field_cstr_xc(tuple, NAME);
-	uint32_t len = snprintf(user->name, sizeof(user->name), "%s", name);
-	if (len >= sizeof(user->name)) {
+	const char *name = tuple_field_xc(tuple, NAME, MP_STR);
+	uint32_t len = mp_decode_strl(&name);
+	char *p;
+	if (len > BOX_NAME_MAX) {
 		tnt_raise(ClientError, ER_CREATE_USER,
-			  name, "user name is too long");
+			  error_abbreviate(name, len),
+			  "user name is too long");
 	}
 	if (user->type != SC_ROLE && user->type != SC_USER) {
 		tnt_raise(ClientError, ER_CREATE_USER,
-			  user->name, "unknown user type");
+			  error_abbreviate(name, len),
+			  "unknown user type");
 	}
-	identifier_check(name);
+	user->name = p = (char *)region_alloc_xc(&fiber()->gc, len + 1);
+	memcpy(p, name, len); p[len] = '\0';
+	identifier_check(user->name);
 	access_check_ddl(user->owner, SC_USER);
 	/*
 	 * AUTH_DATA field in _user space should contain
@@ -1774,7 +1776,7 @@ user_cache_alter_user(struct trigger * /* trigger */, void *event)
 	struct txn_stmt *stmt = txn_last_stmt(txn);
 	struct user_def user;
 	user_def_create_from_tuple(&user, stmt->new_tuple);
-	user_cache_replace(&user);
+	user_cache_replace(&user, NULL);
 }
 
 /**
@@ -1795,7 +1797,7 @@ on_replace_dd_user(struct trigger * /* trigger */, void *event)
 	if (new_tuple != NULL && old_user == NULL) { /* INSERT */
 		struct user_def user;
 		user_def_create_from_tuple(&user, new_tuple);
-		(void) user_cache_replace(&user);
+		(void) user_cache_replace(&user, NULL);
 		struct trigger *on_rollback =
 			txn_alter_trigger_new(user_cache_remove_user, NULL);
 		txn_on_rollback(txn, on_rollback);
@@ -1837,15 +1839,24 @@ on_replace_dd_user(struct trigger * /* trigger */, void *event)
 static void
 func_def_create_from_tuple(struct func_def *def, struct tuple *tuple)
 {
+	char *p;
+	const char *name;
+	uint32_t len;
+
 	def->fid = tuple_field_u32_xc(tuple, ID);
 	def->uid = tuple_field_u32_xc(tuple, UID);
-	const char *name = tuple_field_cstr_xc(tuple, NAME);
-	uint32_t len = strlen(name);
-	if (len >= sizeof(def->name)) {
+	name = tuple_field_xc(tuple, NAME, MP_STR);
+	len = mp_decode_strl(&name);
+
+	if (len > BOX_NAME_MAX) {
 		tnt_raise(ClientError, ER_CREATE_FUNCTION,
-			  name, "function name is too long");
+			  error_abbreviate(name, len),
+			  "function name is too long");
 	}
-	snprintf(def->name, sizeof(def->name), "%s", name);
+	def->name = p = (char *)region_alloc_xc(&fiber()->gc, len + 1);
+	memcpy(p, name, len);
+	p[len] = '\0';
+
 	if (tuple_field_count(tuple) > FUNC_SETUID)
 		def->setuid = tuple_field_u32_xc(tuple, FUNC_SETUID);
 	else

@@ -607,14 +607,22 @@ box_return_tuple(box_function_ctx_t *ctx, box_tuple_t *tuple)
 uint32_t
 box_space_id_by_name(const char *name, uint32_t len)
 {
-	char buf[1 + 5 + BOX_NAME_MAX + 5];
+	size_t buf_size;
+	char *buf, *p;
 	if (len > BOX_NAME_MAX)
 		return BOX_ID_NIL;
+	buf_size = 1 + 5 + len; /* Array header, string header, string data */
 
-	char *p = buf;
-	p = mp_encode_array(p, 1);
+	/* Release memory from fiber()->gc on return */
+	FiberGcScopedGuard fiber_gc_guard;
+
+	buf = (char *)region_alloc(&fiber()->gc, buf_size);
+	if (buf == NULL)
+		return BOX_ID_NIL;
+
+	p = mp_encode_array(buf, 1);
 	p = mp_encode_str(p, name, len);
-	assert(p < buf + sizeof(buf));
+	assert(p <= buf + buf_size);
 
 	/* NOTE: error and missing key cases are indistinguishable */
 	box_tuple_t *tuple;
@@ -628,15 +636,24 @@ box_space_id_by_name(const char *name, uint32_t len)
 uint32_t
 box_index_id_by_name(uint32_t space_id, const char *name, uint32_t len)
 {
-	char buf[1 + 5 + BOX_NAME_MAX + 5];
+	size_t buf_size;
+	char *buf, *p;
 	if (len > BOX_NAME_MAX)
 		return BOX_ID_NIL;
+	/* Array header, uint, string header, string data */
+	buf_size = 1 + 9 + 5 + len;
 
-	char *p = buf;
-	p = mp_encode_array(p, 2);
+	/* Release memory from fiber()->gc on return */
+	FiberGcScopedGuard fiber_gc_guard;
+
+	buf = (char *)region_alloc(&fiber()->gc, buf_size);
+	if (buf == NULL)
+		return BOX_ID_NIL;
+
+	p = mp_encode_array(buf, 2);
 	p = mp_encode_uint(p, space_id);
 	p = mp_encode_str(p, name, len);
-	assert(p < buf + sizeof(buf));
+	assert(p <= buf + buf_size);
 
 	/* NOTE: error and missing key cases are indistinguishable */
 	box_tuple_t *tuple;
@@ -905,11 +922,9 @@ access_check_func(const char *name, uint32_t name_len)
 	if (func == NULL || (func->def.uid != credentials->uid &&
 	     access & ~func->access[credentials->auth_token].effective)) {
 		/* Access violation, report error. */
-		char name_buf[BOX_NAME_MAX + 1];
-		snprintf(name_buf, sizeof(name_buf), "%.*s", name_len, name);
 		struct user *user = user_find_xc(credentials->uid);
 		tnt_raise(ClientError, ER_FUNCTION_ACCESS_DENIED,
-			  priv_name(access), user->def.name, name_buf);
+			  priv_name(access), user->def.name, tt_cstr(name, name_len));
 	}
 
 	return func;

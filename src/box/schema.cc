@@ -205,15 +205,20 @@ schema_find_id(uint32_t system_space_id, uint32_t index_id,
 {
 	struct space *space = space_cache_find(system_space_id);
 	MemtxIndex *index = index_find_system(space, index_id);
-	char buf[BOX_NAME_MAX * 2];
-	/**
-	 * This is an internal-only method, we should know the
-	 * max length in advance.
-	 */
-	if (len + 5 > sizeof(buf))
+
+	size_t buf_size = len + 5;
+	char *buf, *p;
+
+	/* Release memory from fiber()->gc on return */
+	FiberGcScopedGuard fiber_gc_guard;
+
+	buf = (char *)region_alloc(&fiber()->gc, buf_size);
+	if (buf == NULL)
 		return BOX_ID_NIL;
 
-	mp_encode_str(buf, name, len);
+	p = mp_encode_str(buf, name, len);
+	assert((size_t)(p - buf) <= buf_size);
+	(void)p;
 
 	struct iterator *it = index->position();
 	index->initIterator(it, ITER_EQ, buf, 1);
@@ -346,8 +351,11 @@ func_cache_replace(struct func_def *def)
 {
 	struct func *old = func_by_id(def->fid);
 	if (old) {
-		func_update(old, def);
-		return;
+		if (strcmp(old->def.name, def->name) == 0) {
+			func_update(old, def);
+			return;
+		}
+		func_cache_delete(def->fid);
 	}
 	if (mh_size(funcs) >= BOX_FUNCTION_MAX)
 		tnt_raise(ClientError, ER_FUNCTION_MAX, BOX_FUNCTION_MAX);
@@ -413,12 +421,21 @@ func_by_name(const char *name, uint32_t name_len)
 bool
 schema_find_grants(const char *type, uint32_t id)
 {
+	size_t type_len = strlen(type), key_size = 10 + type_len;
+	char *key, *p;
 	struct space *priv = space_cache_find(BOX_PRIV_ID);
 	/** "object" index */
 	MemtxIndex *index = index_find_system(priv, 2);
 	struct iterator *it = index->position();
-	char key[10 + BOX_NAME_MAX];
-	mp_encode_uint(mp_encode_str(key, type, strlen(type)), id);
+
+	/* Release memory from fiber()->gc on return */;
+	FiberGcScopedGuard fuber_gc_guard;
+
+	key = (char *)region_alloc(&fiber()->gc, key_size);
+	if (key == NULL)
+		return false;
+	p = mp_encode_uint(mp_encode_str(key, type, strlen(type)), id);
+	(void)p; assert((size_t)(p - key) <= key_size);
 	index->initIterator(it, ITER_EQ, key, 2);
 	return it->next(it);
 }
