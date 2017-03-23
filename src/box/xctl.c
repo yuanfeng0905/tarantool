@@ -73,6 +73,7 @@ enum xctl_key {
 	XCTL_KEY_IID			= 5,
 	XCTL_KEY_SPACE_ID		= 6,
 	XCTL_KEY_PATH			= 7,
+	XCTL_IS_LEVEL_ZERO              = 8
 };
 
 /**
@@ -88,7 +89,8 @@ static const unsigned long xctl_key_mask[] = {
 	[XCTL_INSERT_VY_RANGE]		= (1 << XCTL_KEY_VY_INDEX_ID) |
 					  (1 << XCTL_KEY_VY_RANGE_ID) |
 					  (1 << XCTL_KEY_VY_RANGE_BEGIN) |
-					  (1 << XCTL_KEY_VY_RANGE_END),
+					  (1 << XCTL_KEY_VY_RANGE_END) |
+					  (1 << XCTL_IS_LEVEL_ZERO),
 	[XCTL_DELETE_VY_RANGE]		= (1 << XCTL_KEY_VY_RANGE_ID),
 	[XCTL_PREPARE_VY_RUN]		= (1 << XCTL_KEY_VY_INDEX_ID) |
 					  (1 << XCTL_KEY_VY_RUN_ID),
@@ -108,6 +110,7 @@ static const char *xctl_key_name[] = {
 	[XCTL_KEY_IID]			= "iid",
 	[XCTL_KEY_SPACE_ID]		= "space_id",
 	[XCTL_KEY_PATH]			= "path",
+	[XCTL_IS_LEVEL_ZERO]            = "is_level_zero"
 };
 
 /** xctl_type -> human readable name. */
@@ -231,6 +234,11 @@ struct vy_range_recovery_info {
 	char *end;
 	/** True if the range was deleted. */
 	bool is_deleted;
+	/**
+	 * True if the range is on the zero level of the index
+	 * ranges tree.
+	 */
+	bool is_level_zero;
 	/**
 	 * Log signature from the time when the range was created
 	 * or deleted.
@@ -428,6 +436,11 @@ xctl_record_encode(const struct xctl_record *record,
 		size += mp_sizeof_str(record->path_len);
 		n_keys++;
 	}
+	if (key_mask & (1 << XCTL_IS_LEVEL_ZERO)) {
+		size += mp_sizeof_uint(XCTL_IS_LEVEL_ZERO);
+		size += mp_sizeof_bool(record->is_level_zero);
+		n_keys++;
+	}
 	size += mp_sizeof_map(n_keys);
 
 	/*
@@ -487,6 +500,10 @@ xctl_record_encode(const struct xctl_record *record,
 	if (key_mask & (1 << XCTL_KEY_PATH)) {
 		pos = mp_encode_uint(pos, XCTL_KEY_PATH);
 		pos = mp_encode_str(pos, record->path, record->path_len);
+	}
+	if (key_mask & (1 << XCTL_IS_LEVEL_ZERO)) {
+		pos = mp_encode_uint(pos, XCTL_IS_LEVEL_ZERO);
+		pos = mp_encode_bool(pos, record->is_level_zero);
 	}
 	assert(pos == tuple + size);
 
@@ -561,6 +578,9 @@ xctl_record_decode(struct xctl_record *record,
 			break;
 		case XCTL_KEY_PATH:
 			record->path = mp_decode_str(&pos, &record->path_len);
+			break;
+		case XCTL_IS_LEVEL_ZERO:
+			record->is_level_zero = mp_decode_bool(&pos);
 			break;
 		default:
 			goto fail;
@@ -1517,7 +1537,7 @@ xctl_recovery_forget_vy_run(struct xctl_recovery *recovery, int64_t vy_run_id)
 static int
 xctl_recovery_insert_vy_range(struct xctl_recovery *recovery,
 		int64_t signature, int64_t vy_index_id, int64_t vy_range_id,
-		const char *begin, const char *end)
+		const char *begin, const char *end, bool is_level_zero)
 {
 	if (xctl_recovery_lookup_vy_range(recovery, vy_range_id) != NULL) {
 		diag_set(ClientError, ER_VINYL, "duplicate vinyl range id");
@@ -1561,6 +1581,7 @@ xctl_recovery_insert_vy_range(struct xctl_recovery *recovery,
 	memcpy(range->end, end, end_size);
 	range->is_deleted = false;
 	range->signature = signature;
+	range->is_level_zero = is_level_zero;
 	rlist_create(&range->runs);
 	rlist_add_entry(&index->ranges, range, in_index);
 	if (recovery->vy_range_id_max < vy_range_id)
@@ -1627,7 +1648,8 @@ xctl_recovery_process_record(struct xctl_recovery *recovery,
 	case XCTL_INSERT_VY_RANGE:
 		rc = xctl_recovery_insert_vy_range(recovery, record->signature,
 				record->vy_index_id, record->vy_range_id,
-				record->vy_range_begin, record->vy_range_end);
+				record->vy_range_begin, record->vy_range_end,
+				record->is_level_zero);
 		break;
 	case XCTL_DELETE_VY_RANGE:
 		rc = xctl_recovery_delete_vy_range(recovery, record->signature,
@@ -1809,6 +1831,7 @@ xctl_recovery_iterate_vy_index(struct vy_index_recovery_info *index,
 		record.signature = range->signature;
 		record.vy_range_id = range->id;
 		record.vy_range_begin = tmp = range->begin;
+		record.is_level_zero = true;
 		if (mp_decode_array(&tmp) == 0)
 			record.vy_range_begin = NULL;
 		record.vy_range_end = tmp = range->end;

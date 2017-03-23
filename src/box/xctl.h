@@ -158,6 +158,11 @@ struct xctl_record {
 	const char *path;
 	/** Length of the path string. */
 	uint32_t path_len;
+	/**
+	 * True if the range is on the zero level of the index
+	 * ranges tree.
+	 */
+	bool is_level_zero;
 };
 
 /**
@@ -349,7 +354,8 @@ xctl_drop_vy_index(int64_t vy_index_id)
 /** Helper to log a vinyl range insertion. */
 static inline void
 xctl_insert_vy_range(int64_t vy_index_id, int64_t vy_range_id,
-		     const char *vy_range_begin, const char *vy_range_end)
+		     const char *vy_range_begin, const char *vy_range_end,
+		     bool is_level_zero)
 {
 	struct xctl_record record;
 	record.type = XCTL_INSERT_VY_RANGE;
@@ -358,6 +364,7 @@ xctl_insert_vy_range(int64_t vy_index_id, int64_t vy_range_id,
 	record.vy_range_id = vy_range_id;
 	record.vy_range_begin = vy_range_begin;
 	record.vy_range_end = vy_range_end;
+	record.is_level_zero = is_level_zero;
 	xctl_write(&record);
 }
 
