@@ -763,6 +763,19 @@ xctl_begin_recovery(const struct vclock *vclock)
 	if (xdir_scan(&xctl.dir) < 0)
 		return -1;
 
+	struct vclock xctl_vclock;
+	if (xdir_last_vclock(&xctl.dir, &xctl_vclock) >= 0 &&
+	    vclock_compare(&xctl_vclock, vclock) > 0) {
+		/*
+		 * Last xctl log is newer than the last snapshot.
+		 * This can't normally happen, as xctl is rotated
+		 * after snapshot is created. Looks like somebody
+		 * deleted snap file, but forgot to delete xctl.
+		 */
+		diag_set(ClientError, ER_MISSING_SNAPSHOT);
+		return -1;
+	}
+
 	struct xctl_recovery *recovery;
 	recovery = xctl_recovery_new(INT64_MAX);
 	if (recovery == NULL)
@@ -1362,7 +1375,7 @@ xctl_recovery_create_vy_run(struct xctl_recovery *recovery, int64_t vy_run_id)
 	}
 	struct mh_i64ptr_t *h = recovery->vy_run_hash;
 	struct mh_i64ptr_node_t node = { vy_run_id, run };
-	struct mh_i64ptr_node_t *old_node;
+	struct mh_i64ptr_node_t *old_node = NULL;
 	if (mh_i64ptr_put(h, &node, &old_node, NULL) == mh_end(h)) {
 		diag_set(OutOfMemory, 0, "mh_i64ptr_put", "mh_i64ptr_node_t");
 		free(run);
