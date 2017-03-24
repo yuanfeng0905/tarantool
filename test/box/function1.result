@@ -1,4 +1,4 @@
-package.cpath = '../box/?.so;../box/?.dylib;'..package.cpath
+package.cpath = '../../box/?.so;../../box/?.dylib;'..package.cpath
 ---
 ...
 log = require('log')

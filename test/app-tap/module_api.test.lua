@@ -2,7 +2,7 @@
 
 box.cfg{log = "tarantool.log"}
 
-package.cpath = '../app-tap/?.so;../app-tap/?.dylib;'
+package.cpath = '../../app-tap/?.so;../../app-tap/?.dylib;'
 
 local function test_pushcdata(test, module)
     test:plan(6)
