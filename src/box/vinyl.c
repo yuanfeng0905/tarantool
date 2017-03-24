@@ -3049,9 +3049,9 @@ err_wi:
  * iterator to the run file until the end of the range is encountered.
  */
 static int
-vy_range_write_run(struct vy_range *range, struct vy_write_iterator *wi,
-		   struct tuple **stmt, size_t *written,
-		   size_t max_output_count, double bloom_fpr,
+vy_index_write_run(struct vy_index *index, const char *end, struct vy_run *run,
+		   struct vy_write_iterator *wi, struct tuple **stmt,
+		   size_t *written, size_t max_output_count, double bloom_fpr,
 		   uint64_t *dumped_statements)
 {
 	assert(stmt != NULL);
@@ -3060,11 +3060,9 @@ vy_range_write_run(struct vy_range *range, struct vy_write_iterator *wi,
 	if (*stmt == NULL)
 		return 0;
 
-	const struct vy_index *index = range->index;
 	const struct key_def *key_def = index->key_def;
 	const struct key_def *user_key_def = index->user_key_def;
 
-	struct vy_run *run = range->new_run;
 	assert(run != NULL);
 
 	ERROR_INJECT(ERRINJ_VY_RANGE_DUMP,
@@ -3074,8 +3072,8 @@ vy_range_write_run(struct vy_range *range, struct vy_write_iterator *wi,
 	struct bloom_spectrum bs;
 	bloom_spectrum_create(&bs, max_output_count, bloom_fpr, runtime.quota);
 
-	if (vy_run_write_data(run, index->path, wi, stmt, range->end, &bs,
-			      key_def, user_key_def) != 0)
+	if (vy_run_write_data(run, index->path, wi, stmt, end, &bs, key_def,
+			      user_key_def) != 0)
 		return -1;
 
 	bloom_spectrum_choose(&bs, &run->info.bloom);
@@ -3929,8 +3927,9 @@ vy_task_dump_execute(struct vy_task *task)
 
 	/* Start iteration. */
 	if (vy_write_iterator_next(wi, &stmt) != 0 ||
-	    vy_range_write_run(range, wi, &stmt, &task->dump_size,
-			       task->max_output_count, task->bloom_fpr,
+	    vy_index_write_run(range->index, range->end, range->new_run, wi,
+			       &stmt, &task->dump_size, task->max_output_count,
+			       task->bloom_fpr,
 			       &task->dumped_statements) != 0) {
 		vy_write_iterator_cleanup(wi);
 		return -1;
@@ -4094,9 +4093,9 @@ vy_task_split_execute(struct vy_task *task)
 					       "vinyl range split");
 				      goto error;});
 		}
-		if (vy_range_write_run(r, wi, &stmt, &task->dump_size,
-				       task->max_output_count, task->bloom_fpr,
-				       &unused) != 0)
+		if (vy_index_write_run(r->index, r->end, r->new_run, wi, &stmt,
+				       &task->dump_size, task->max_output_count,
+				       task->bloom_fpr, &unused) != 0)
 			goto error;
 	}
 	vy_write_iterator_cleanup(wi);
@@ -4344,9 +4343,9 @@ vy_task_compact_execute(struct vy_task *task)
 
 	/* Start iteration. */
 	if (vy_write_iterator_next(wi, &stmt) != 0 ||
-	    vy_range_write_run(range, wi, &stmt, &task->dump_size,
-			       task->max_output_count, task->bloom_fpr,
-			       &unused) != 0) {
+	    vy_index_write_run(range->index, range->end, range->new_run, wi,
+			       &stmt, &task->dump_size, task->max_output_count,
+			       task->bloom_fpr, &unused) != 0) {
 		vy_write_iterator_cleanup(wi);
 		return -1;
 	}
