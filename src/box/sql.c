@@ -404,13 +404,13 @@ int tarantoolSqlite3Delete(BtCursor *pCur, u8 flags)
 
 int tarantoolSqlite3ClearTable(int iTable)
 {
-  int space_id = SQLITE_PAGENO_TO_SPACEID(iTable);
+	int space_id = SQLITE_PAGENO_TO_SPACEID(iTable);
 
-  if (box_truncate(space_id) != 0) {
-    return SQLITE_TARANTOOL_ERROR;
-  }
+	if (box_truncate(space_id) != 0) {
+		return SQLITE_TARANTOOL_ERROR;
+	}
 
-  return SQLITE_OK;
+	return SQLITE_OK;
 }
 
 /*
