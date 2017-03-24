@@ -661,6 +661,7 @@ static int saveCursorPosition(BtCursor *pCur){
   assert( 0==pCur->pKey );
   assert( cursorHoldsMutex(pCur) );
 
+  if (pCur->curFlags & BTCF_TaCursor) return SQLITE_OK;
   if( pCur->eState==CURSOR_SKIPNEXT ){
     pCur->eState = CURSOR_VALID;
   }else{

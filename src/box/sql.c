@@ -210,7 +210,7 @@ cursor_seek(BtCursor *pCur, int *pRes, enum iterator_type type,
 	    const char *k, const char *ke);
 
 static int
-cursor_advance(BtCursor *pCur, int *pRes);
+cursor_advance(BtCursor *pCur, int *pRes, int restore_pos);
 
 const char *tarantoolErrorMessage()
 {
@@ -268,7 +268,7 @@ int tarantoolSqlite3Next(BtCursor *pCur, int *pRes)
 	assert(iterator_direction(
 		((struct ta_cursor *)pCur->pTaCursor)->type
 	) > 0);
-	return cursor_advance(pCur, pRes);
+	return cursor_advance(pCur, pRes, 1);
 }
 
 int tarantoolSqlite3Previous(BtCursor *pCur, int *pRes)
@@ -282,7 +282,7 @@ int tarantoolSqlite3Previous(BtCursor *pCur, int *pRes)
 	assert(iterator_direction(
 		((struct ta_cursor *)pCur->pTaCursor)->type
 	) < 0);
-	return cursor_advance(pCur, pRes);
+	return cursor_advance(pCur, pRes, 1);
 }
 
 int tarantoolSqlite3MovetoUnpacked(BtCursor *pCur, UnpackedRecord *pIdxKey,
@@ -637,16 +637,16 @@ cursor_seek(BtCursor *pCur, int *pRes, enum iterator_type type,
 	c->type = type;
 	pCur->eState = CURSOR_VALID;
 	pCur->curIntKey = 0;
-	return cursor_advance(pCur, pRes);
+	return cursor_advance(pCur, pRes, 0);
 }
 
 static int
-cursor_advance(BtCursor *pCur, int *pRes)
+cursor_advance(BtCursor *pCur, int *pRes, int restore_pos)
 {
 	assert(pCur->curFlags & BTCF_TaCursor);
 
 	struct ta_cursor *c;
-	struct tuple *tuple;
+	struct tuple *tuple, *tuple_last;
 	int rc;
 
 	c = pCur->pTaCursor;
@@ -656,15 +656,34 @@ cursor_advance(BtCursor *pCur, int *pRes)
 	rc = box_iterator_next(c->iter, &tuple);
 	if (rc)
 		return SQLITE_TARANTOOL_ERROR;
-	if (c->tuple_last) box_tuple_unref(c->tuple_last);
+	tuple_last = c->tuple_last;
 	if (tuple) {
 		box_tuple_ref(tuple);
 		*pRes = 0;
+	} else if (restore_pos && tuple_last != NULL) {
+		/* Restore cursor position - seek past the last tuple. */
+		size_t original_size = region_used(&fiber()->gc);
+		const char *key;
+		uint32_t key_size;
+		enum iterator_type type;
+		key = tuple_extract_key(tuple_last,
+					box_iterator_key_def(c->iter),
+					&key_size);
+		if (key == NULL)
+			return SQLITE_TARANTOOL_ERROR;
+		if (iterator_direction(c->type) > 0)
+			type = ITER_GT;
+		else
+			type = ITER_LT;
+		rc = cursor_seek(pCur, pRes, type, key, key + key_size);
+		region_truncate(&fiber()->gc, original_size);
+		return rc;
 	} else {
 		pCur->eState = CURSOR_INVALID;
 		*pRes = 1;
 	}
 	c->tuple_last = tuple;
+	if (tuple_last) box_tuple_unref(tuple_last);
 	return SQLITE_OK;
 }
 
