@@ -73,6 +73,7 @@ vy_mem_new(struct lsregion *allocator, const int64_t *allocator_lsn,
 		return NULL;
 	}
 	index->min_lsn = INT64_MAX;
+	index->min_rid = INT64_MAX;
 	index->used = 0;
 	index->key_def = key_def;
 	index->version = 0;
@@ -89,6 +90,9 @@ vy_mem_new(struct lsregion *allocator, const int64_t *allocator_lsn,
 			   vy_mem_tree_extent_free, index);
 	rlist_create(&index->in_frozen);
 	rlist_create(&index->in_dirty);
+	rlist_create(&index->in_committed);
+	index->pin_count = 0;
+	ipc_cond_create(&index->pin_cond);
 	return index;
 }
 
@@ -115,6 +119,7 @@ vy_mem_delete(struct vy_mem *index)
 	tuple_format_ref(index->format, -1);
 	tuple_format_ref(index->format_with_colmask, -1);
 	tuple_format_ref(index->upsert_format, -1);
+	ipc_cond_destroy(&index->pin_cond);
 	TRASH(index);
 	free(index);
 }
@@ -150,18 +155,47 @@ vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt)
 	assert(vy_stmt_is_region_allocated(stmt));
 	size_t size = tuple_size(stmt);
 	const struct tuple *replaced_stmt = NULL;
-	int rc = vy_mem_tree_insert(&mem->tree, stmt, &replaced_stmt);
+	int rc =  vy_mem_tree_insert(&mem->tree, stmt, &replaced_stmt);
 	if (rc != 0)
-		return -1;
-
+		return rc;
 	if (mem->used == 0)
+		mem->min_rid = vy_stmt_lsn(stmt);
+	mem->version++;
+	mem->used += size;
+	vy_mem_pin(mem);
+	return 0;
+}
+
+void
+vy_mem_confirm(struct vy_mem *mem, const struct tuple *stmt)
+{
+	/* Check if the statement can be inserted in the vy_mem. */
+	assert(stmt->format_id == tuple_format_id(mem->format_with_colmask) ||
+	       stmt->format_id == tuple_format_id(mem->format) ||
+	       stmt->format_id == tuple_format_id(mem->upsert_format));
+	/* The statement must be from a lsregion. */
+	assert(vy_stmt_is_region_allocated(stmt));
+	if (mem->min_lsn == INT64_MAX)
 		mem->min_lsn = vy_stmt_lsn(stmt);
 	assert(mem->min_lsn <= vy_stmt_lsn(stmt));
+	vy_mem_unpin(mem);
+}
 
-	mem->used += size;
+void
+vy_mem_erase(struct vy_mem *mem, const struct tuple *stmt)
+{
+	/* Check if the statement can be inserted in the vy_mem. */
+	assert(stmt->format_id == tuple_format_id(mem->format_with_colmask) ||
+	       stmt->format_id == tuple_format_id(mem->format) ||
+	       stmt->format_id == tuple_format_id(mem->upsert_format));
+	/* The statement must be from a lsregion. */
+	assert(vy_stmt_is_region_allocated(stmt));
+	int rc = vy_mem_tree_delete(&mem->tree, stmt);
+	assert(rc == 0);
+	(void)rc;
+
 	mem->version++;
-
-	return 0;
+	vy_mem_unpin(mem);
 }
 
 /* }}} vy_mem */

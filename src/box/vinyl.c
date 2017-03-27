@@ -103,6 +103,8 @@ enum vy_status {
 	VINYL_ONLINE,
 };
 
+static const int64_t MAX_LSN = INT64_MAX / 2;
+
 /**
  * Global configuration of an entire vinyl instance (env object).
  */
@@ -528,6 +530,10 @@ typedef rb_tree(struct vy_range) vy_range_tree_t;
 struct txv {
 	struct vy_index *index;
 	struct tuple *stmt;
+	/** A tuple in mem's region; is set in vy_prepare */
+	const struct tuple *mem_stmt;
+	/** A mem in which mem_stmt is placed */
+	struct vy_mem *mem;
 	struct vy_tx *tx;
 	/** Next in the transaction log. */
 	struct stailq_entry next_in_log;
@@ -733,9 +739,9 @@ enum tx_state {
 	 * It may still be rolled back if there is an error
 	 * writing the WAL.
 	 */
-	VINYL_TX_COMMIT,
-	/** A transaction is aborted or rolled back. */
-	VINYL_TX_ROLLBACK
+	VINYL_TX_PREPARED,
+	/** A transaction is aborted by a conflict. */
+	VINYL_TX_ABORT
 };
 
 struct read_set_key {
@@ -761,7 +767,13 @@ struct vy_tx {
 	 * the version increments.
 	 */
 	uint32_t write_set_version;
+	/**
+	 * ev time saved in vy_begin()
+	 */
 	ev_tstamp start;
+	/**
+	 * Current state of the TX
+	 */
 	enum tx_state state;
 	/**
 	 * The transaction is forbidden to commit unless it's read-only.
@@ -778,9 +790,31 @@ struct vy_tx {
 	 * not see this change.
 	 * If T does not have any write statements by the commit time it will
 	 * be committed successfully, or aborted as conflicted otherwise.
+	 *
+	 * Once the TX is prepared, this member is set to the temporary
+	 * virtual lsn (until commit)
 	 */
 	int64_t vlsn;
-	rb_node(struct vy_tx) tree_node;
+	/**
+	 * Transaction sequence number in order of prepare.
+	 * Is zero for not prepared transaction
+	 */
+	int64_t tsn;
+	/**
+	 * The list of directly dependent transactions.
+	 *  For non-prepared TXs it is empty;
+	 *  For prepared TXs it holds a list of TXs with a read view
+	 *   directly on this TX, i.e. a list of TXs that see the TX and
+	 *   don't see later TXs.
+	 */
+	struct rlist dd_list;
+	/**
+	 * The link in:
+	 *  (1) list of prepared TXs in TX manager
+	 *  (2) list of directly dependent list of another TX
+	 *  (3) list of list of read_view_list in TX manager
+	 */
+	struct rlist link;
 	/*
 	 * For non-autocommit transactions, the list of open
 	 * cursors. When a transaction ends, all open cursors are
@@ -789,6 +823,10 @@ struct vy_tx {
 	struct rlist cursors;
 	struct tx_manager *manager;
 };
+
+static int
+vy_tx_track(struct vy_tx *tx, struct vy_index *index,
+	    struct tuple *key, bool is_gap);
 
 /**
  * Merge iterator takes several iterators as sources and sorts
@@ -1022,6 +1060,8 @@ txv_new(struct vy_index *index, struct tuple *stmt, struct vy_tx *tx)
 	v->index = index;
 	v->stmt = stmt;
 	tuple_ref(stmt);
+	v->mem_stmt = NULL;
+	v->mem = NULL;
 	v->tx = tx;
 	return v;
 }
@@ -1077,76 +1117,32 @@ read_set_key_cmp(struct read_set_key *a, struct txv *b)
 	return rc;
 }
 
-typedef rb_tree(struct vy_tx) tx_tree_t;
-
-static int
-tx_tree_cmp(struct vy_tx *a, struct vy_tx *b)
-{
-	int rc = vy_cmp(a->vlsn, b->vlsn);
-	return rc ? rc : vy_cmp(a, b);
-}
-
-rb_gen(MAYBE_UNUSED static inline, tx_tree_, tx_tree_t, struct vy_tx,
-       tree_node, tx_tree_cmp);
-
-
 struct tx_manager {
-	tx_tree_t tree;
-	uint32_t count_tx;
+	/**
+	 * The number of concurrent TXs
+	 */
+	uint32_t tx_count;
 	/**
 	 * The last committed log sequence number known to
 	 * vinyl. Updated in vy_commit().
 	 */
 	int64_t lsn;
 	/**
-	 * View sequence number: the oldest read view maintained
-	 * by the front end.
+	 * Transaction sequence number: the last assigned in vy_prepare
+	 * unique incremental ID of a transaction
 	 */
-	int64_t vlsn;
+	int64_t tsn;
+	/**
+	 * The list of prepared RW TX, older TX in the beginning.
+	 */
+	struct rlist prep_list;
+	/**
+	 * The list of TXs with a read view in order of vlsn.
+	 *
+	 */
+	struct rlist read_view_list;
 	struct vy_env *env;
 };
-
-/**
- * Send to a read view all transaction which are reading the stmt v
- *  written by tx.
- */
-static void
-vy_send_to_read_view(struct vy_env *env, struct vy_tx *tx, struct txv *v)
-{
-	read_set_t *tree = &v->index->read_set;
-	struct key_def *key_def = v->index->key_def;
-	struct read_set_key key;
-	key.stmt = v->stmt;
-	key.tx = NULL;
-	/** Find the first value equal to or greater than key */
-	for (struct txv *abort = read_set_nsearch(tree, &key);
-	     abort != NULL; abort = read_set_next(tree, abort)) {
-		/* Check if we're still looking at the matching key. */
-		if (vy_stmt_compare(key.stmt, abort->stmt, key_def))
-			break;
-		/* Don't abort self. */
-		if (abort->tx == tx)
-			continue;
-		/* Delete of nothing does not cause a conflict */
-		if (abort->is_gap && vy_stmt_type(v->stmt) == IPROTO_DELETE)
-			continue;
-
-		/* the found tx can only be commited as read-only */
-		abort->tx->is_in_read_view = true;
-		/* Set the read view of the found (now read-only) tx */
-		if (abort->tx->vlsn == INT64_MAX) {
-			abort->tx->vlsn = env->xm->lsn;
-			tx_tree_insert(&env->xm->tree, abort->tx);
-			if (env->xm->vlsn == INT64_MAX)
-				env->xm->vlsn = abort->tx->vlsn;
-			else
-				assert(env->xm->vlsn <= env->xm->lsn);
-		} else {
-			assert(abort->tx->vlsn <= env->xm->lsn);
-			assert(abort->tx->vlsn >= env->xm->vlsn);
-		}
-	}
-}
 
 static int
 write_set_cmp(struct txv *a, struct txv *b)
@@ -1196,12 +1192,6 @@ write_set_search_key(write_set_t *tree, struct vy_index *index,
 	return write_set_search(tree, &key);
 }
 
-static bool
-vy_tx_is_ro(struct vy_tx *tx)
-{
-	return tx->write_set.rbt_root == &tx->write_set.rbt_nil;
-}
-
 static struct tx_manager *
 tx_manager_new(struct vy_env *env)
 {
@@ -1210,11 +1200,12 @@ tx_manager_new(struct vy_env *env)
 		diag_set(OutOfMemory, sizeof(*m), "tx_manager", "struct");
 		return NULL;
 	}
-	tx_tree_new(&m->tree);
-	m->count_tx = 0;
+	m->tx_count = 0;
 	m->lsn = 0;
-	m->vlsn = INT64_MAX;
+	m->tsn = 0;
 	m->env = env;
+	rlist_create(&m->prep_list);
+	rlist_create(&m->read_view_list);
 	return m;
 }
 
@@ -1228,114 +1219,19 @@ tx_manager_delete(struct tx_manager *m)
 /*
  * Determine a lowest possible vlsn - the level below which the
  * history could be compacted.
- * If there are active read views, it is the m->vlsn. If there is
- * no active read view (m->vlsn == INT64_MAX), a read view could
- * be created at any moment with vlsn = m->lsn. Therefore, the
- * minimum of m->vlsn and m->lsn must be chosen.
+ * If there are active read views, it is the first's vlsn. If there is
+ * no active read view, a read view could be created at any moment
+ * with vlsn = m->lsn, so m->lsn must be chosen.
  */
 static int64_t
-tx_manager_vlsn(struct tx_manager *m)
+tx_manager_vlsn(struct tx_manager *xm)
 {
-	assert(m->vlsn == INT64_MAX || m->vlsn <= m->lsn);
-	int64_t vlsn = m->vlsn;
-	if (vlsn == INT64_MAX)
-		vlsn = m->lsn;
-	return vlsn;
-}
-
-static struct txv *
-read_set_delete_cb(read_set_t *t, struct txv *v, void *arg)
-{
-	(void) t;
-	(void) arg;
-	txv_delete(v);
-	return NULL;
-}
-
-static void
-vy_tx_begin(struct tx_manager *m, struct vy_tx *tx)
-{
-	stailq_create(&tx->log);
-	write_set_new(&tx->write_set);
-	tx->write_set_version = 0;
-	tx->start = ev_now(loop());
-	tx->manager = m;
-	tx->state = VINYL_TX_READY;
-	tx->is_in_read_view = false;
-	rlist_create(&tx->cursors);
-
-	/* possible read-write tx reads latest changes */
-	tx->vlsn = INT64_MAX;
-	m->count_tx++;
-}
-
-/**
- * Remember the read in the conflict manager index.
- */
-static int
-vy_tx_track(struct vy_tx *tx, struct vy_index *index,
-	    struct tuple *key, bool is_gap)
-{
-	if (tx->is_in_read_view)
-		return 0; /* no reason to track reads */
-	uint32_t part_count = tuple_field_count(key);
-	if (part_count >= index->key_def->part_count) {
-		struct txv *v =
-			write_set_search_key(&tx->write_set, index, key);
-		if (v != NULL && (vy_stmt_type(v->stmt) == IPROTO_REPLACE ||
-				  vy_stmt_type(v->stmt) == IPROTO_DELETE)) {
-			/** reading from own write set is serializable */
-			return 0;
-		}
-	}
-	struct txv *v = read_set_search_key(&index->read_set, key, tx);
-	if (v == NULL) {
-		if ((v = txv_new(index, key, tx)) == NULL)
-			return -1;
-		v->is_read = true;
-		v->is_gap = is_gap;
-		stailq_add_tail_entry(&tx->log, v, next_in_log);
-		read_set_insert(&index->read_set, v);
-	}
-	return 0;
-}
-
-static void
-vy_tx_destroy(struct tx_manager *m, struct vy_tx *tx)
-{
-	if (tx->vlsn != INT64_MAX) {
-		tx_tree_remove(&m->tree, tx);
-		if (tx->vlsn == m->vlsn) {
-			struct vy_tx * oldest = tx_tree_first(&m->tree);
-			m->vlsn = oldest ? oldest->vlsn : INT64_MAX;
-		}
-	}
-
-	/** Abort all open cursors. */
-	struct vy_cursor *c;
-	rlist_foreach_entry(c, &tx->cursors, next_in_tx)
-		c->tx = NULL;
-
-	/* Remove from the conflict manager index */
-	struct txv *v;
-	stailq_foreach_entry(v, &tx->log, next_in_log)
-		if (v->is_read)
-			read_set_remove(&v->index->read_set, v);
-
-	m->count_tx--;
-}
-
-static void
-vy_tx_rollback(struct vy_env *e, struct vy_tx *tx)
-{
-	if (tx->state == VINYL_TX_READY) {
-		/** freewill rollback, vy_prepare have not been called yet */
-		vy_tx_destroy(tx->manager, tx);
-	}
-	struct txv *v, *tmp;
-	stailq_foreach_entry_safe(v, tmp, &tx->log, next_in_log)
-		txv_delete(v);
-	e->stat->tx_rlb++;
+	if (rlist_empty(&xm->read_view_list))
+		return xm->lsn;
+	struct vy_tx *lowest = rlist_first_entry(&xm->read_view_list,
+						 struct vy_tx, link);
+	assert(lowest->vlsn <= MAX_LSN);
+	return lowest->vlsn;
 }
 
 static struct vy_page_info *
@@ -1609,6 +1505,20 @@ vy_range_discard_new_run(struct vy_range *range)
 	}
 }
 
+/**
+ * Wait until all in-memory indexes of the given range are unpinned.
+ * This is called right before devolving a dump or compaction task
+ * on a worker thread to make sure we don't dump an in-memory index
+ * which has active transactions.
+ */
+static void
+vy_range_wait_pinned(struct vy_range *range)
+{
+	struct vy_mem *mem;
+	rlist_foreach_entry(mem, &range->frozen, in_frozen)
+		vy_mem_wait_pinned(mem);
+}
+
 /** Return true if a task was scheduled for a given range. */
 static bool
 vy_range_is_scheduled(struct vy_range *range)
@@ -1625,6 +1535,8 @@ vy_scheduler_remove_range(struct vy_scheduler *, struct vy_range*);
 static void
 vy_scheduler_mem_dirtied(struct vy_scheduler *scheduler, struct vy_mem *mem);
 static void
+vy_scheduler_mem_committed(struct vy_scheduler *scheduler, struct vy_mem *mem);
+static void
 vy_scheduler_mem_dumped(struct vy_scheduler *scheduler, struct vy_mem *mem);
 
 static int
@@ -1639,34 +1551,6 @@ rb_gen_ext_key(MAYBE_UNUSED static inline, vy_range_tree_, vy_range_tree_t,
 
 static void
 vy_range_delete(struct vy_range *);
-
-static struct vy_range *
-vy_range_tree_free_cb(vy_range_tree_t *t, struct vy_range *range, void *arg)
-{
-	(void)t;
-	struct vy_index *index = (struct vy_index *) arg;
-	struct vy_scheduler *scheduler = index->env->scheduler;
-
-	/*
-	 * Exempt the range along with all its in-memory indexes
-	 * from the scheduler.
-	 */
-	if (range->mem != NULL)
-		vy_scheduler_mem_dumped(scheduler, range->mem);
-	struct vy_mem *mem;
-	rlist_foreach_entry(mem, &range->frozen, in_frozen)
-		vy_scheduler_mem_dumped(scheduler, mem);
-	if (range->in_dump.pos != UINT32_MAX) {
-		/*
-		 * The range could have already been removed
-		 * by vy_schedule().
-		 */
-		vy_scheduler_remove_range(scheduler, range);
-	}
-
-	vy_range_delete(range);
-	return NULL;
-}
 
 static void
 vy_index_ref(struct vy_index *index);
@@ -3511,7 +3395,7 @@ vy_index_open_ex(struct vy_index *index)
  */
 static int
 vy_range_set(struct vy_range *range, const struct tuple *stmt,
-	     const struct tuple **region_stmt)
+	     const struct tuple **region_stmt, struct vy_mem **mem)
 {
 	assert(!vy_stmt_is_region_allocated(stmt));
 	assert(*region_stmt == NULL ||
@@ -3519,58 +3403,86 @@ vy_range_set(struct vy_range *range, const struct tuple *stmt,
 	struct vy_index *index = range->index;
 	struct vy_scheduler *scheduler = index->env->scheduler;
 	struct lsregion *allocator = &index->env->allocator;
-	struct vy_mem *mem = range->mem;
-	int64_t lsn = vy_stmt_lsn(stmt);
+	*mem = range->mem;
+	int64_t rid = vy_stmt_lsn(stmt);
 
-	bool was_empty = (mem->used == 0);
-	/*
-	 * Allocate region_stmt on demand.
-	 */
+	/* Allocate region_stmt on demand. */
 	if (*region_stmt == NULL) {
-		*region_stmt = vy_stmt_dup_lsregion(stmt, allocator, lsn);
+		*region_stmt = vy_stmt_dup_lsregion(stmt, allocator, rid);
 		if (*region_stmt == NULL)
 			return -1;
 	}
-	if (vy_mem_insert(mem, *region_stmt) != 0) {
-		/* Sic: can't free region_stmt allocated on lsregion */
+
+	/* We can't free region_stmt below, so let's add it to the stats */
+	range->used += tuple_size(stmt);
+	index->used += tuple_size(stmt);
+	index->stmt_count++;
+
+	if (vy_mem_insert(*mem, *region_stmt))
 		return -1;
-	}
 
-	if (was_empty)
-		vy_scheduler_mem_dirtied(scheduler, mem);
+	vy_scheduler_mem_dirtied(scheduler, *mem);
 
-	if (range->used == 0) {
+	return 0;
+}
+
+/*
+ * Confirm that the statement have to stay in the range's in-memory index.
+ * One of the vy_range_set_confirm and vy_range_erase methods must be called
+ * after a successful call of vy_range_set method
+ * @param range Range to which the statement insert to.
+ * @param stmt the Statement.
+ * @param mem the mem where the stmt was saved.
+ */
+static void
+vy_range_set_confirm(const struct tuple *stmt, struct vy_index *index,
+		     struct vy_mem *mem)
+{
+	vy_mem_confirm(mem, stmt);
+
+	struct vy_scheduler *scheduler = index->env->scheduler;
+	int64_t lsn = vy_stmt_lsn(stmt);
+
+	vy_scheduler_mem_committed(scheduler, mem);
+
+	struct vy_range *range;
+	range = vy_range_tree_find_by_key(&index->tree, ITER_EQ, index->key_def,
+					  stmt);
+
+	if (range->min_lsn == INT64_MAX) {
 		range->min_lsn = lsn;
 		vy_scheduler_update_range(scheduler, range);
 	}
 
 	assert(mem->min_lsn <= lsn);
 	assert(range->min_lsn <= lsn);
+}
 
-	size_t size = tuple_size(stmt);
-	range->used += size;
-	index->used += size;
-	index->stmt_count++;
-
-	return 0;
+/*
+ * Erase a statement from the range's in-memory index.
+ */
+static void
+vy_range_erase(struct vy_mem *mem, const struct tuple *stmt)
+{
+	vy_mem_erase(mem, stmt);
 }
 
 static void
 vy_index_squash_upserts(struct vy_index *index, struct tuple *stmt);
 
 static int
-vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
+vy_range_set_upsert(struct vy_range *range, struct tuple *stmt,
+		    const struct tuple **region_stmt, struct vy_mem **mem)
 {
 	assert(vy_stmt_type(stmt) == IPROTO_UPSERT);
 
 	struct vy_index *index = range->index;
 	struct vy_stat *stat = index->env->stat;
 	struct key_def *key_def = index->key_def;
-	struct vy_mem *mem = range->mem;
+	*mem = range->mem;
 	const struct tuple *older;
 	int64_t lsn = vy_stmt_lsn(stmt);
-	older = vy_mem_older_lsn(mem, stmt);
-	const struct tuple *region_stmt = NULL;
+	older = vy_mem_older_lsn(*mem, stmt);
 	if ((older != NULL && vy_stmt_type(older) != IPROTO_UPSERT) ||
 	    (older == NULL && range->shadow == NULL &&
 	     rlist_empty(&range->frozen) && range->run_count == 0)) {
@@ -3607,7 +3519,7 @@ vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
 		}
 		assert(older == NULL || upserted_lsn != vy_stmt_lsn(older));
 		assert(vy_stmt_type(upserted) == IPROTO_REPLACE);
-		int rc = vy_range_set(range, upserted, &region_stmt);
+		int rc = vy_range_set(range, upserted, region_stmt, mem);
 		tuple_unref(upserted);
 		if (rc < 0)
 			return -1;
@@ -3639,7 +3551,7 @@ vy_range_set_upsert(struct vy_range *range, struct tuple *stmt)
 			vy_stmt_set_n_upserts(stmt, VY_UPSERT_INF);
 		}
 	}
-	return vy_range_set(range, stmt, &region_stmt);
+	return vy_range_set(range, stmt, region_stmt, mem);
 }
 
 /*
@@ -3680,19 +3592,19 @@ vy_stmt_is_committed(struct vy_index *index, const struct tuple *stmt)
  * lsregion copy then use it, else create it.
  * @param index Index to write to.
  * @param stmt Statement allocated from malloc().
+ * @param status Vinyl engine status.
  * @param region_stmt NULL or the same statement as stmt,
  *                    but allocated on lsregion.
- * @param status Vinyl engine status.
+ * @param mem NULL the mem in which the tuple was saved
  * @param checkpoint_lsn snapshot signature if snapshot is
- *                       in progress, otherwise -1.
  *
  * @retval  0 Success.
  * @retval -1 Memory error.
  */
 static int
-vy_tx_write(struct vy_index *index, struct tuple *stmt,
-	    const struct tuple **region_stmt, enum vy_status status,
-	    int64_t checkpoint_lsn)
+vy_index_write(struct vy_index *index, struct tuple *stmt,
+	       enum vy_status status, const struct tuple **region_stmt,
+	       struct vy_mem **mem, int64_t checkpoint_lsn)
 {
 	assert(!vy_stmt_is_region_allocated(stmt));
 	assert(*region_stmt == NULL ||
@@ -3733,10 +3645,10 @@ vy_tx_write(struct vy_index *index, struct tuple *stmt,
 	int rc;
 	switch (vy_stmt_type(stmt)) {
 	case IPROTO_UPSERT:
-		rc = vy_range_set_upsert(range, stmt);
+		rc = vy_range_set_upsert(range, stmt, region_stmt, mem);
 		break;
 	default:
-		rc = vy_range_set(range, stmt, region_stmt);
+		rc = vy_range_set(range, stmt, region_stmt, mem);
 		break;
 	}
 	/*
@@ -3746,6 +3658,41 @@ vy_tx_write(struct vy_index *index, struct tuple *stmt,
 	vy_cache_on_write(cache, stmt);
 
 	return rc;
+}
+
+/**
+ * Remove previously added statement from an index.
+ * @param index Index to erase from.
+ * @param stmt Statement allocated from lsregion)_.
+ */
+static void
+vy_index_write_confirm(struct vy_index *index, const struct tuple *stmt,
+		       struct vy_mem *mem)
+{
+	vy_range_set_confirm(stmt, index, mem);
+	/*
+	 * Invalidate cache element.
+	 */
+	struct vy_cache *cache = index->cache;
+	vy_cache_on_write(cache, stmt);
+}
+
+/**
+ * Remove previously added statement from an index.
+ * @param index Index to erase from.
+ * @param stmt Statement allocated from lsregion)_.
+ */
+static void
+vy_index_abort(struct vy_index *index, const struct tuple *stmt,
+	       struct vy_mem *mem)
+{
+	vy_range_erase(mem, stmt);
+
+	/*
+	 * Invalidate cache element.
+	 */
+	struct vy_cache *cache = index->cache;
+	vy_cache_on_write(cache, stmt);
 }
 
 /* {{{ Scheduler Task */
@@ -3799,7 +3746,7 @@ struct vy_task {
 	 * When we dump or compact a range, we write all its frozen
 	 * in-memory trees that existed when the task was scheduled
 	 * (see vy_range_get_write_iterator()). During task execution,
-	 * new trees can be added due to DDL (see vy_tx_write()),
+	 * new trees can be added due to DDL (see vy_index_write()),
 	 * hence we need to remember which trees we are going
 	 * to write so as to only delete dumped trees upon task
 	 * completion.
@@ -3983,6 +3930,7 @@ vy_task_dump_new(struct mempool *pool, struct vy_range *range,
 	task->dump_lsn = MIN(xm->lsn, dump_lsn);
 	task->bloom_fpr = index->env->conf->bloom_fpr;
 
+	vy_range_wait_pinned(range);
 	vy_scheduler_remove_range(scheduler, range);
 
 	say_info("%s: started dumping range %s",
@@ -4229,6 +4177,7 @@ vy_task_split_new(struct mempool *pool, struct vy_range *range,
 	task->dump_lsn = xm->lsn;
 	task->bloom_fpr = index->env->conf->bloom_fpr;
 
+	vy_range_wait_pinned(range);
 	vy_scheduler_remove_range(scheduler, range);
 
 	say_info("%s: started splitting range %s by key %s",
@@ -4411,6 +4360,7 @@ vy_task_compact_new(struct mempool *pool, struct vy_range *range,
 	task->dump_lsn = xm->lsn;
 	task->bloom_fpr = index->env->conf->bloom_fpr;
 
+	vy_range_wait_pinned(range);
 	vy_scheduler_remove_range(scheduler, range);
 
 	say_info("%s: started compacting range %s, runs %d/%d",
@@ -4442,6 +4392,8 @@ heap_dump_less(struct heap_node *a, struct heap_node *b)
 	struct vy_range *left = container_of(a, struct vy_range, in_dump);
 	struct vy_range *right = container_of(b, struct vy_range, in_dump);
 
+	assert(left->min_lsn == INT64_MAX || left->min_lsn <= MAX_LSN);
+	assert(right->min_lsn == INT64_MAX || right->min_lsn <= MAX_LSN);
 	/* Older ranges are dumped first. */
 	return left->min_lsn < right->min_lsn;
 }
@@ -4526,10 +4478,17 @@ struct vy_scheduler {
 	bool is_throttled;
 
 	/**
-	 * List of all non-empty in-memory indexes.
+	 * List of all non-empty (in terms of allocated data) in-memory indexes.
 	 * Older mems are closer to the tail of the list.
 	 */
 	struct rlist dirty_mems;
+	/** Min region ID over all in-memory indexes. */
+	int64_t mem_min_rid;
+	/**
+	 * List of all non-empty (in terms of committed data) in-memory indexes.
+	 * Older mems are closer to the tail of the list.
+	 */
+	struct rlist committed_mems;
 	/** Min LSN over all in-memory indexes. */
 	int64_t mem_min_lsn;
 	/**
@@ -4595,6 +4554,8 @@ vy_scheduler_new(struct vy_env *env)
 	tt_pthread_mutex_init(&scheduler->mutex, NULL);
 	diag_create(&scheduler->diag);
 	rlist_create(&scheduler->dirty_mems);
+	scheduler->mem_min_rid = INT64_MAX;
+	rlist_create(&scheduler->committed_mems);
 	scheduler->mem_min_lsn = INT64_MAX;
 	scheduler->checkpoint_lsn = -1;
 	ipc_cond_create(&scheduler->checkpoint_cond);
@@ -5057,10 +5018,27 @@ vy_scheduler_stop_workers(struct vy_scheduler *scheduler)
 static void
 vy_scheduler_mem_dirtied(struct vy_scheduler *scheduler, struct vy_mem *mem)
 {
+	assert(mem->min_rid > MAX_LSN);
+	/** Do not insert twice */
+	if (!rlist_empty(&mem->in_dirty))
+		return;
 	if (rlist_empty(&scheduler->dirty_mems))
+		scheduler->mem_min_rid = mem->min_rid;
+	assert(scheduler->mem_min_rid <= mem->min_rid);
+	rlist_add_entry(&scheduler->dirty_mems, mem, in_dirty);
+}
+
+static void
+vy_scheduler_mem_committed(struct vy_scheduler *scheduler, struct vy_mem *mem)
+{
+	assert(mem->min_lsn <= MAX_LSN);
+	/** Do not insert twice */
+	if (!rlist_empty(&mem->in_committed))
+		return;
+	if (rlist_empty(&scheduler->committed_mems))
 		scheduler->mem_min_lsn = mem->min_lsn;
 	assert(scheduler->mem_min_lsn <= mem->min_lsn);
-	rlist_add_entry(&scheduler->dirty_mems, mem, in_dirty);
+	rlist_add_entry(&scheduler->committed_mems, mem, in_committed);
 }
 
 static void
@@ -5072,11 +5050,24 @@ vy_scheduler_mem_dumped(struct vy_scheduler *scheduler, struct vy_mem *mem)
 		return;
 
 	rlist_del_entry(mem, in_dirty);
+	rlist_create(&mem->in_dirty);
+	rlist_del_entry(mem, in_committed);
+	rlist_create(&mem->in_committed);
 
 	if (!rlist_empty(&scheduler->dirty_mems)) {
 		struct vy_mem *oldest;
 		oldest = rlist_last_entry(&scheduler->dirty_mems,
 					  struct vy_mem, in_dirty);
+		assert(oldest->min_rid > MAX_LSN);
+		scheduler->mem_min_rid = oldest->min_rid;
+	} else {
+		scheduler->mem_min_rid = INT64_MAX;
+	}
+	if (!rlist_empty(&scheduler->committed_mems)) {
+		struct vy_mem *oldest;
+		oldest = rlist_last_entry(&scheduler->committed_mems,
+					  struct vy_mem, in_committed);
+		assert(oldest->min_lsn <= MAX_LSN);
 		scheduler->mem_min_lsn = oldest->min_lsn;
 	} else {
 		scheduler->mem_min_lsn = INT64_MAX;
@@ -5085,7 +5076,7 @@ vy_scheduler_mem_dumped(struct vy_scheduler *scheduler, struct vy_mem *mem)
 	/* Free memory and release quota. */
 	struct lsregion *allocator = &env->allocator;
 	size_t mem_used_before = lsregion_used(allocator);
-	lsregion_gc(allocator, scheduler->mem_min_lsn - 1);
+	lsregion_gc(allocator, scheduler->mem_min_rid - 1);
 	size_t mem_used_after = lsregion_used(allocator);
 	assert(mem_used_after <= mem_used_before);
 	vy_quota_release(&env->quota, mem_used_before - mem_used_after);
@@ -5346,7 +5337,7 @@ vy_info_append_performance(struct vy_env *env, struct vy_info_handler *h)
 
 	vy_info_append_u64(h, "tx_rollback", stat->tx_rlb);
 	vy_info_append_u64(h, "tx_conflict", stat->tx_conflict);
-	vy_info_append_u32(h, "tx_active", env->xm->count_tx);
+	vy_info_append_u32(h, "tx_active", env->xm->tx_count);
 
 	vy_info_append_u64(h, "dump_bandwidth", vy_stat_dump_bandwidth(stat));
 	vy_info_append_u64(h, "dump_total", stat->dump_total);
@@ -5778,6 +5769,44 @@ vy_commit_alter_space(struct space *old_space, struct space *new_space)
 		index->space_index_count = new_space->index_count;
 	}
 	return 0;
+}
+
+
+static struct txv *
+read_set_delete_cb(read_set_t *t, struct txv *v, void *arg)
+{
+	(void) t;
+	(void) arg;
+	txv_delete(v);
+	return NULL;
+}
+
+static struct vy_range *
+vy_range_tree_free_cb(vy_range_tree_t *t, struct vy_range *range, void *arg)
+{
+	(void)t;
+	struct vy_index *index = (struct vy_index *) arg;
+	struct vy_scheduler *scheduler = index->env->scheduler;
+
+	/*
+	 * Exempt the range along with all its in-memory indexes
+	 * from the scheduler.
+	 */
+	if (range->mem != NULL)
+		vy_scheduler_mem_dumped(scheduler, range->mem);
+	struct vy_mem *mem;
+	rlist_foreach_entry(mem, &range->frozen, in_frozen)
+		vy_scheduler_mem_dumped(scheduler, mem);
+	if (range->in_dump.pos != UINT32_MAX) {
+		/*
+		 * The range could have already been removed
+		 * by vy_schedule().
+		 */
+		vy_scheduler_remove_range(scheduler, range);
+	}
+
+	vy_range_delete(range);
+	return NULL;
 }
 
 static void
@@ -7000,118 +7029,28 @@ vy_replace(struct vy_tx *tx, struct txn_stmt *stmt, struct space *space,
 	}
 }
 
-void
-vy_rollback(struct vy_env *e, struct vy_tx *tx)
+static void
+vy_tx_create(struct tx_manager *xm, struct vy_tx *tx)
 {
-	vy_tx_rollback(e, tx);
-	TRASH(tx);
-	free(tx);
+	stailq_create(&tx->log);
+	write_set_new(&tx->write_set);
+	tx->write_set_version = 0;
+	tx->start = ev_now(loop());
+	tx->manager = xm;
+	tx->state = VINYL_TX_READY;
+	tx->is_in_read_view = false;
+	tx->tsn = 0;
+	rlist_create(&tx->dd_list);
+	rlist_create(&tx->link);
+	rlist_create(&tx->cursors);
+
+	/* possible read-write tx reads latest changes */
+	tx->vlsn = INT64_MAX;
+	xm->tx_count++;
 }
 
-int
-vy_prepare(struct vy_env *e, struct vy_tx *tx)
-{
-	/* prepare transaction */
-	assert(tx->state == VINYL_TX_READY);
-	int rc = 0;
-
-	/* proceed read-only transactions */
-	if (!vy_tx_is_ro(tx) && tx->is_in_read_view) {
-		tx->state = VINYL_TX_ROLLBACK;
-		e->stat->tx_conflict++;
-		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
-		rc = -1;
-	} else {
-		tx->state = VINYL_TX_COMMIT;
-		/** Abort read/write intersection */
-		struct txv *v = write_set_first(&tx->write_set);
-		for (; v != NULL; v = write_set_next(&tx->write_set, v))
-			vy_send_to_read_view(e, tx, v);
-	}
-
-	vy_tx_destroy(tx->manager, tx);
-
-	/*
-	 * A half committed transaction is no longer
-	 * being part of concurrent index, but still can be
-	 * committed or rolled back.
-	 * Yet, it is important to maintain external
-	 * serial commit order.
-	 */
-	return rc;
-}
-
-int
-vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
-{
-	assert(tx->state == VINYL_TX_COMMIT);
-	if (lsn > e->xm->lsn)
-		e->xm->lsn = lsn;
-
-	struct txv *v, *tmp;
-	struct vy_quota *quota = &e->quota;
-	struct lsregion *allocator = &e->allocator;
-	size_t mem_used_before = lsregion_used(allocator);
-	/*
-	 * Flush transactional changes to the index.
-	 * Sic: the loop below must not yield after recovery.
-	 */
-	uint64_t write_count = 0;
-	const struct tuple *delete = NULL, *replace = NULL;
-	enum vy_status status = e->status;
-	int64_t checkpoint_lsn = e->scheduler->checkpoint_lsn;
-	MAYBE_UNUSED uint32_t current_space_id = 0;
-	stailq_foreach_entry(v, &tx->log, next_in_log) {
-		/*
-		 * The tx log contains both reads and writes, but
-		 * we must save only writes.
-		 */
-		if (v->is_read)
-			continue;
-		struct vy_index *index = v->index;
-		struct tuple *stmt = v->stmt;
-		vy_stmt_set_lsn(stmt, lsn);
-		enum iproto_type type = vy_stmt_type(stmt);
-		if (index->key_def->iid == 0) {
-			/*
-			 * The beginning of the new txn_stmt is met.
-			 */
-			current_space_id = index->space->def.id;
-			replace = NULL;
-			delete = NULL;
-		}
-		assert(index->space->def.id == current_space_id);
-		/*
-		 * In secondary indexes only REPLACE and DELETE
-		 * can be wrote.
-		 */
-		const struct tuple **region_stmt =
-			(type == IPROTO_DELETE) ? &delete : &replace;
-		if (vy_tx_write(index, stmt, region_stmt,
-				status, checkpoint_lsn) != 0)
-			return -1;
-		write_count++;
-	}
-
-	uint32_t count = 0;
-	stailq_foreach_entry_safe(v, tmp, &tx->log, next_in_log) {
-		count++;
-		txv_delete(v);
-	}
-	size_t mem_used_after = lsregion_used(allocator);
-	assert(mem_used_after >= mem_used_before);
-	size_t write_size = mem_used_after - mem_used_before;
-	vy_stat_tx(e->stat, tx->start, count, write_count, write_size);
-
-	TRASH(tx);
-	free(tx);
-
-	vy_quota_use(quota, write_size);
-	return 0;
-}
-
-struct vy_tx *
-vy_begin(struct vy_env *e)
+static struct vy_tx *
+vy_tx_new(struct tx_manager *xm)
 {
 	struct vy_tx *tx;
 	tx = malloc(sizeof(struct vy_tx));
@@ -7120,19 +7059,296 @@ vy_begin(struct vy_env *e)
 			 "struct vy_tx");
 		return NULL;
 	}
-	vy_tx_begin(e->xm, tx);
+	vy_tx_create(xm, tx);
 	return tx;
+}
+
+static void
+vy_tx_abort_cursors(struct vy_tx *tx)
+{
+	struct vy_cursor *c;
+	rlist_foreach_entry(c, &tx->cursors, next_in_tx)
+		c->tx = NULL;
+}
+
+static void
+vy_tx_destroy(struct vy_tx *tx)
+{
+	struct tx_manager *xm = tx->manager;
+
+	rlist_del_entry(tx, link);
+
+	vy_tx_abort_cursors(tx);
+
+	/* Remove read set from the conflict manager index */
+	struct txv *v, *tmp;
+	stailq_foreach_entry_safe(v, tmp, &tx->log, next_in_log) {
+		if (v->is_read)
+			read_set_remove(&v->index->read_set, v);
+		txv_delete(v);
+	}
+
+	TRASH(tx);
+
+	xm->tx_count--;
+}
+
+static bool
+vy_tx_is_ro(struct vy_tx *tx)
+{
+	return tx->write_set.rbt_root == &tx->write_set.rbt_nil;
+}
+
+/**
+ * Remember the read in the conflict manager index.
+ */
+static int
+vy_tx_track(struct vy_tx *tx, struct vy_index *index,
+	    struct tuple *key, bool is_gap)
+{
+	if (tx->is_in_read_view)
+		return 0; /* no reason to track reads */
+	uint32_t part_count = tuple_field_count(key);
+	if (part_count >= index->key_def->part_count) {
+		struct txv *v =
+			write_set_search_key(&tx->write_set, index, key);
+		if (v != NULL && (vy_stmt_type(v->stmt) == IPROTO_REPLACE ||
+				  vy_stmt_type(v->stmt) == IPROTO_DELETE)) {
+			/** reading from own write set is serializable */
+			return 0;
+		}
+	}
+	struct txv *v = read_set_search_key(&index->read_set, key, tx);
+	if (v == NULL) {
+		if ((v = txv_new(index, key, tx)) == NULL)
+			return -1;
+		v->is_gap = is_gap;
+		v->is_read = true;
+		stailq_add_tail_entry(&tx->log, v, next_in_log);
+		read_set_insert(&index->read_set, v);
+	}
+	return 0;
+}
+
+/**
+ * Send to a read view all transaction which are reading the stmt v
+ *  written by tx.
+ */
+static void
+vy_tx_send_to_read_view(struct vy_tx *tx, struct txv *v)
+{
+	struct tx_manager *xm = tx->manager;
+	read_set_t *tree = &v->index->read_set;
+	struct key_def *key_def = v->index->key_def;
+	struct read_set_key key;
+	key.stmt = v->stmt;
+	key.tx = NULL;
+	/** Find the first value equal to or greater than key */
+	for (struct txv *abort = read_set_nsearch(tree, &key);
+	     abort != NULL; abort = read_set_next(tree, abort)) {
+		/* Check if we're still looking at the matching key. */
+		if (vy_stmt_compare(key.stmt, abort->stmt, key_def))
+			break;
+		/* Don't abort self. */
+		if (abort->tx == tx)
+			continue;
+		/* Delete of nothing does not cause a conflict */
+		if (abort->is_gap && vy_stmt_type(v->stmt) == IPROTO_DELETE)
+			continue;
+		/* already in (earlier) read view */
+		if (abort->tx->is_in_read_view)
+			continue;
+		abort->tx->is_in_read_view = true;
+		/* Set the read view of the found (now read-only) tx */
+		assert((rlist_first_entry(&xm->prep_list, struct vy_tx, link) == tx));
+		if (rlist_last_entry(&xm->prep_list, struct vy_tx, link) == tx) {
+			abort->tx->vlsn = xm->lsn;
+			rlist_add_tail_entry(&xm->read_view_list, abort->tx, link);
+		} else {
+			struct vy_tx *rv_tx = rlist_next_entry(tx, link);
+			abort->tx->vlsn = rv_tx->vlsn;
+			rlist_add_tail_entry(&rv_tx->dd_list, abort->tx, link);
+		}
+	}
+}
+
+static int
+vy_tx_prepare(struct vy_tx *tx)
+{
+	struct tx_manager *xm = tx->manager;
+	struct vy_env *env = xm->env;
+	/* proceed non-aborted read-only transactions */
+	if ((!vy_tx_is_ro(tx) && tx->is_in_read_view) ||
+		tx->state == VINYL_TX_ABORT) {
+		env->stat->tx_conflict++;
+		diag_set(ClientError, ER_TRANSACTION_CONFLICT);
+		return -1;
+	}
+
+	assert(tx->state == VINYL_TX_READY);
+
+	/* wait for quota to be not overused */
+	vy_quota_use(&env->quota, 0);
+
+	tx->state = VINYL_TX_PREPARED;
+
+	if (vy_tx_is_ro(tx))
+		return 0;
+
+	tx->tsn = ++xm->tsn;
+	tx->vlsn = MAX_LSN + tx->tsn;
+	assert(rlist_empty(&tx->link));
+	rlist_add_entry(&xm->prep_list, tx, link);
+
+	/** Send to read view read/write intersection */
+	for (struct txv *v = write_set_first(&tx->write_set);
+	     v != NULL; v = write_set_next(&tx->write_set, v))
+		vy_tx_send_to_read_view(tx, v);
+
+
+	/*
+	 * Flush transactional changes to the index.
+	 * Sic: the loop below must not yield after recovery.
+	 */
+	size_t mem_used_before = lsregion_used(&env->allocator);
+	int count = 0, write_count = 0;
+	const struct tuple *delete = NULL, *replace = NULL;
+	enum vy_status status = env->status;
+	int64_t checkpoint_lsn = env->scheduler->checkpoint_lsn;
+	MAYBE_UNUSED uint32_t current_space_id = 0;
+	struct txv *v;
+	stailq_foreach_entry(v, &tx->log, next_in_log) {
+		/* Save only writes. */
+		if (v->is_read)
+			continue;
+
+		struct vy_index *index = v->index;
+		if (index->key_def->iid == 0) {
+			/* The beginning of the new txn_stmt is met. */
+			current_space_id = index->space->def.id;
+			replace = NULL;
+			delete = NULL;
+		}
+		assert(index->space->def.id == current_space_id);
+
+		/* In secondary indexes only REPLACE/DELETE can be written. */
+		vy_stmt_set_lsn(v->stmt, tx->vlsn);
+		enum iproto_type type = vy_stmt_type(v->stmt);
+		const struct tuple **region_stmt =
+			(type == IPROTO_DELETE) ? &delete : &replace;
+		if (vy_index_write(index, v->stmt, status, region_stmt,
+				   &v->mem, checkpoint_lsn) != 0)
+			return -1;
+		v->mem_stmt = *region_stmt;
+		write_count++;
+	}
+	size_t mem_used_after = lsregion_used(&env->allocator);
+	assert(mem_used_after >= mem_used_before);
+	size_t write_size = mem_used_after - mem_used_before;
+	vy_stat_tx(env->stat, tx->start, count, write_count, write_size);
+	vy_quota_force_use(&env->quota, write_size);
+	return 0;
+}
+
+static void
+vy_tx_commit(struct vy_tx *tx, int64_t lsn)
+{
+	assert(tx->state == VINYL_TX_PREPARED);
+
+	if (vy_tx_is_ro(tx)) {
+		vy_tx_destroy(tx);
+		return;
+	}
+
+	struct tx_manager *xm = tx->manager;
+
+	assert(xm->lsn < lsn);
+	xm->lsn = lsn;
+
+	/* Fix LSNs of the records and commit changes */
+	struct txv *v;
+	stailq_foreach_entry(v, &tx->log, next_in_log) {
+		if (v->mem_stmt != 0) {
+			vy_stmt_set_lsn((struct tuple *)v->mem_stmt, lsn);
+			vy_index_write_confirm(v->index, v->mem_stmt,
+					       v->mem);
+		}
+	}
+
+	/* Fix read views of depened TXs */
+	struct vy_tx *dep, *tmp;
+	rlist_foreach_entry_safe(dep, &tx->dd_list, link, tmp) {
+		dep->vlsn = lsn;
+		rlist_add_tail_entry(&xm->read_view_list, dep, link);
+	}
+	vy_tx_destroy(tx);
+}
+
+static void
+vy_tx_rollback_prepared(struct vy_tx *tx)
+{
+	assert(tx->state == VINYL_TX_PREPARED);
+
+	struct txv *v;
+	stailq_foreach_entry(v, &tx->log, next_in_log) {
+		if (v->mem_stmt != NULL)
+			vy_index_abort(v->index, v->mem_stmt, v->mem);
+	}
+
+	/* Abort read views of depened TXs */
+	struct vy_tx *dep;
+	rlist_foreach_entry(dep, &tx->dd_list, link)
+		dep->state = VINYL_TX_ABORT;
+}
+
+static void
+vy_tx_rollback(struct vy_tx *tx)
+{
+	tx->manager->env->stat->tx_rlb++;
+
+	if (tx->state == VINYL_TX_PREPARED)
+		vy_tx_rollback_prepared(tx);
+
+	vy_tx_destroy(tx);
+}
+
+struct vy_tx *
+vy_begin(struct vy_env *e)
+{
+	return vy_tx_new(e->xm);
+}
+
+int
+vy_prepare(struct vy_tx *tx)
+{
+	return vy_tx_prepare(tx);
+}
+
+void
+vy_commit(struct vy_tx *tx, int64_t lsn)
+{
+	vy_tx_commit(tx, lsn);
+	free(tx);
+}
+
+void
+vy_rollback(struct vy_tx *tx)
+{
+	vy_tx_rollback(tx);
+	free(tx);
 }
 
 void *
 vy_savepoint(struct vy_tx *tx)
 {
+	assert(tx->state == VINYL_TX_READY);
 	return stailq_last(&tx->log);
 }
 
 void
 vy_rollback_to_savepoint(struct vy_tx *tx, void *svp)
 {
+	assert(tx->state == VINYL_TX_READY);
 	struct stailq_entry *last = svp;
 	/* Start from the first statement after the savepoint. */
 	last = last == NULL ? stailq_first(&tx->log) : stailq_next(last);
@@ -10287,13 +10503,15 @@ vy_squash_process(struct vy_squash *squash)
 	 */
 	size_t mem_used_before = lsregion_used(&env->allocator);
 	const struct tuple *region_stmt = NULL;
-	rc = vy_range_set(range, result, &region_stmt);
+	rc = vy_range_set(range, result, &region_stmt, &mem);
 	tuple_unref(result);
 	size_t mem_used_after = lsregion_used(&env->allocator);
 	assert(mem_used_after >= mem_used_before);
-	if (rc == 0)
+	if (rc == 0) {
+		vy_range_set_confirm(region_stmt, index, mem);
 		vy_quota_force_use(&env->quota,
 				   mem_used_after - mem_used_before);
+	}
 	return rc;
 }
 
@@ -10399,7 +10617,7 @@ vy_cursor_new(struct vy_tx *tx, struct vy_index *index, const char *key,
 	c->env = e;
 	if (tx == NULL) {
 		tx = &c->tx_autocommit;
-		vy_tx_begin(e->xm, tx);
+		vy_tx_create(e->xm, tx);
 	} else {
 		rlist_add(&tx->cursors, &c->next_in_tx);
 	}
@@ -10447,8 +10665,8 @@ vy_cursor_next(struct vy_cursor *c, struct tuple **result)
 	assert(index->space_index_count > 0);
 	*result = NULL;
 
-	if (c->tx == NULL) {
-		diag_set(ClientError, ER_NO_ACTIVE_TRANSACTION);
+	if (c->tx == NULL || c->tx->state == VINYL_TX_ABORT) {
+		diag_set(ClientError, ER_READ_VIEW_ABORTED);
 		return -1;
 	}
 
@@ -10488,7 +10706,7 @@ vy_cursor_delete(struct vy_cursor *c)
 	if (c->tx != NULL) {
 		if (c->tx == &c->tx_autocommit) {
 			/* Rollback the automatic transaction. */
-			vy_tx_rollback(e, c->tx);
+			vy_tx_rollback(c->tx);
 		} else {
 			/*
 			 * Delete itself from the list of open cursors

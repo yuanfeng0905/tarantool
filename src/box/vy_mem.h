@@ -40,6 +40,7 @@
 #include "vy_stmt.h" /* for comparators */
 #include "vy_mem.h" /* struct vy_mem_tree_iterator */
 #include "vy_stmt_iterator.h" /* struct vy_stmt_iterator */
+#include "ipc.h"
 
 #if defined(__cplusplus)
 extern "C" {
@@ -133,12 +134,16 @@ struct vy_mem {
 	struct rlist in_frozen;
 	/** Link in scheduler->dirty_mems list. */
 	struct rlist in_dirty;
+	/** Link in scheduler->committed_mems list. */
+	struct rlist in_committed;
 	/** BPS tree */
 	struct vy_mem_tree tree;
 	/** The total size of all tuples in this tree in bytes */
 	size_t used;
 	/** The minimum value of stmt->lsn in this tree */
 	int64_t min_lsn;
+	/** The minimum lsregion ID that was allocated for that mem */
+	int64_t min_rid;
 	/* A key definition for this index. */
 	struct key_def *key_def;
 	/** version is initially 0 and is incremented on every write */
@@ -158,7 +163,55 @@ struct vy_mem {
 	struct tuple_format *format_with_colmask;
 	/** Same as format, but for UPSERT tuples. */
 	struct tuple_format *upsert_format;
+	/**
+	 * Number of active writers to this index.
+	 *
+	 * Incremented for modified in-memory trees when
+	 * preparing a transaction. Decremented after writing
+	 * to WAL or rollback.
+	 */
+	int pin_count;
+	/**
+	 * Condition variable signaled by vy_mem_unpin()
+	 * if pin_count reaches 0.
+	 */
+	struct ipc_cond pin_cond;
 };
+
+/**
+ * Pin an in-memory index.
+ *
+ * A pinned in-memory index can't be dumped until it's unpinned.
+ */
+static inline void
+vy_mem_pin(struct vy_mem *mem)
+{
+	mem->pin_count++;
+}
+
+/**
+ * Unpin an in-memory index.
+ *
+ * This function reverts the effect of vy_mem_pin().
+ */
+static inline void
+vy_mem_unpin(struct vy_mem *mem)
+{
+	assert(mem->pin_count > 0);
+	mem->pin_count--;
+	if (mem->pin_count == 0)
+		ipc_cond_broadcast(&mem->pin_cond);
+}
+
+/**
+ * Wait until an in-memory index is unpinned.
+ */
+static inline void
+vy_mem_wait_pinned(struct vy_mem *mem)
+{
+	while (mem->pin_count > 0)
+		ipc_cond_wait(&mem->pin_cond);
+}
 
 /**
  * Instantiate a new in-memory level.
@@ -201,6 +254,22 @@ vy_mem_older_lsn(struct vy_mem *mem, const struct tuple *stmt);
  */
 int
 vy_mem_insert(struct vy_mem *mem, const struct tuple *stmt);
+
+/**
+ * Confirm insertion of a statement into the in-memory level.
+ * @param mem        vy_mem.
+ * @param stmt       Vinyl statement.
+ */
+void
+vy_mem_confirm(struct vy_mem *mem, const struct tuple *stmt);
+
+/**
+ * Remove a statement from the in-memory level.
+ * @param mem        vy_mem.
+ * @param stmt       Vinyl statement.
+ */
+void
+vy_mem_erase(struct vy_mem *mem, const struct tuple *stmt);
 
 /**
  * Iterator for in-memory level.

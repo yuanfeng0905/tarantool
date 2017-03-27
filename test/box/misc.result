@@ -290,6 +290,7 @@ t;
   - 'box.error.EXACT_MATCH : 19'
   - 'box.error.NO_SUCH_TRIGGER : 34'
   - 'box.error.injection : table: <address>
+  - 'box.error.READ_VIEW_ABORTED : 129'
   - 'box.error.ROLE_EXISTS : 83'
   - 'box.error.LOCAL_INSTANCE_ID_IS_READ_ONLY : 128'
   - 'box.error.REPLICASET_UUID_IS_RO : 65'
