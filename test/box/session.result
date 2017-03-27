@@ -1,3 +1,11 @@
+env = require('test_run')
+---
+...
+test_run = env.new()
+---
+...
+-- need to restart server because this tests depends on hanging connections
+test_run:cmd('restart server default')
 session = box.session
 ---
 ...
